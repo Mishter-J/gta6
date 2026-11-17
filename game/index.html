@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>Port Meridian — Open-World Crime</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #0b0e1a;
+    font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif; color: #fff;
+    -webkit-user-select: none; user-select: none; }
+  #game { position: fixed; inset: 0; display: block; }
+  .hidden { display: none !important; }
+
+  /* ---------- HUD ---------- */
+  #hud { position: fixed; inset: 0; pointer-events: none; z-index: 5; }
+  #top-right { position: absolute; top: 14px; right: 16px; text-align: right; }
+  #wanted { font-size: 26px; letter-spacing: 4px; color: #ffd23e;
+    text-shadow: 0 0 8px rgba(0,0,0,.9), 0 2px 2px #000; line-height: 1; }
+  #wanted .off { color: rgba(255,255,255,.22); }
+  #cash { margin-top: 6px; font-size: 22px; font-weight: 700; color: #7dff9b;
+    text-shadow: 0 0 6px rgba(0,0,0,.9), 0 2px 2px #000; }
+  #clock { font-size: 15px; font-weight: 600; color: #eaf2ff; opacity: .9;
+    text-shadow: 0 2px 2px #000; }
+  #radio { font-size: 12px; color: #ffd23e; opacity: .95; text-shadow: 0 2px 2px #000; }
+  #bottom-left { position: absolute; left: 16px; bottom: 16px; width: 240px; }
+  .bar-label { font-size: 11px; font-weight: 700; letter-spacing: 2px; color: #fff;
+    text-shadow: 0 1px 2px #000; margin: 6px 0 2px; }
+  .bar { height: 12px; background: rgba(0,0,0,.55); border: 1px solid rgba(255,255,255,.35);
+    border-radius: 6px; overflow: hidden; }
+  .bar > div { height: 100%; transition: width .15s linear; }
+  #health-fill { background: linear-gradient(90deg, #37e07a, #a5f2c0); width: 100%; }
+  #armor-fill { background: linear-gradient(90deg, #3fa7ff, #9fd6ff); width: 0%; }
+  #speed { position: absolute; right: 16px; bottom: 16px; text-align: right; }
+  #speed-num { font-size: 44px; font-weight: 800; line-height: .9;
+    text-shadow: 0 0 8px rgba(0,0,0,.9), 0 2px 2px #000; }
+  #speed-unit { font-size: 12px; letter-spacing: 3px; color: #ffd23e; font-weight: 700; }
+  #objective-box { position: absolute; top: 14px; left: 16px; max-width: 420px; }
+  #objective { font-size: 19px; font-weight: 800; color: #ffd23e;
+    text-shadow: 0 0 6px rgba(0,0,0,.9), 0 2px 2px #000; }
+  #objective-sub { font-size: 14px; color: #fff; margin-top: 2px;
+    text-shadow: 0 2px 2px #000; }
+  #minimap-wrap { position: absolute; right: 16px; bottom: 96px; width: 208px; height: 208px;
+    border: 2px solid rgba(255,255,255,.55); border-radius: 50%; overflow: hidden;
+    background: #10182a; box-shadow: 0 0 0 4px rgba(0,0,0,.45), 0 4px 18px rgba(0,0,0,.6); }
+  #minimap { width: 100%; height: 100%; display: block; }
+  #crosshair { position: absolute; left: 50%; top: 50%; width: 22px; height: 22px;
+    margin: -11px 0 0 -11px; }
+  #crosshair::before, #crosshair::after { content: ""; position: absolute; background: #fff;
+    box-shadow: 0 0 3px #000; }
+  #crosshair::before { left: 10px; top: 0; width: 2px; height: 22px; }
+  #crosshair::after { left: 0; top: 10px; width: 22px; height: 2px; }
+  #hint { position: absolute; left: 50%; bottom: 22%; transform: translateX(-50%);
+    font-size: 17px; font-weight: 700; background: rgba(0,0,0,.6); padding: 8px 16px;
+    border-radius: 6px; border: 1px solid rgba(255,255,255,.35); white-space: nowrap; }
+  #hint b { color: #ffd23e; }
+  #banner { position: absolute; left: 50%; top: 26%; transform: translate(-50%, -50%);
+    text-align: center; width: 100%; }
+  #banner-title { font-size: 52px; font-weight: 900; letter-spacing: 6px; color: #ffd23e;
+    text-shadow: 0 0 18px rgba(255,180,0,.55), 0 4px 0 #7a4d00, 0 6px 14px #000; }
+  #banner-sub { font-size: 20px; font-weight: 600; color: #fff; text-shadow: 0 2px 4px #000; }
+  #dialogue { position: absolute; left: 50%; bottom: 120px; transform: translateX(-50%);
+    width: 560px; max-width: 86vw; background: rgba(8,10,24,.82); border: 1px solid #ffd23e;
+    border-radius: 10px; padding: 14px 18px; }
+  #dialogue-name { color: #ffd23e; font-weight: 800; font-size: 14px; letter-spacing: 2px; }
+  #dialogue-text { font-size: 16px; line-height: 1.45; margin-top: 4px; }
+  #damage-flash { position: fixed; inset: 0; pointer-events: none; z-index: 6;
+    background: radial-gradient(ellipse at center, transparent 55%, rgba(255,0,0,.45) 100%);
+    opacity: 0; transition: opacity .12s; }
+  #toast { position: absolute; left: 50%; top: 76px; transform: translateX(-50%);
+    font-size: 15px; font-weight: 700; color: #fff; background: rgba(0,0,0,.55);
+    padding: 6px 14px; border-radius: 20px; }
+
+  /* ---------- Screens ---------- */
+  .screen { position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; text-align: center;
+    background: linear-gradient(180deg, rgba(10,8,32,.25) 0%, rgba(10,8,32,.78) 62%, rgba(10,8,32,.92) 100%); }
+  .screen h1 { font-size: 84px; font-weight: 900; letter-spacing: 10px; line-height: .95;
+    color: #fff; text-shadow: 0 0 24px rgba(255,180,0,.65), 0 6px 0 #b3541e, 0 10px 26px #000; }
+  .screen h1 .gold { color: #ffd23e; }
+  .screen h2 { font-size: 20px; font-weight: 600; letter-spacing: 8px; color: #ffd23e;
+    margin-top: 8px; text-shadow: 0 2px 6px #000; }
+  .screen p.story { max-width: 640px; font-size: 16px; line-height: 1.55; color: #e8ecff;
+    margin: 22px 0 6px; text-shadow: 0 2px 4px #000; }
+  .btn { pointer-events: auto; cursor: pointer; margin-top: 14px; font-size: 18px;
+    font-weight: 800; letter-spacing: 2px; color: #14100a; background: #ffd23e;
+    border: none; border-radius: 8px; padding: 13px 34px;
+    box-shadow: 0 4px 0 #a67c00, 0 8px 20px rgba(0,0,0,.5); }
+  .btn:hover { background: #ffe066; }
+  .btn.ghost { background: rgba(255,255,255,.14); color: #fff; box-shadow: none;
+    border: 1px solid rgba(255,255,255,.5); font-size: 15px; padding: 10px 24px; }
+  .controls { margin-top: 26px; font-size: 13.5px; line-height: 1.9; color: #cfd6f2;
+    background: rgba(0,0,0,.45); border: 1px solid rgba(255,255,255,.25); border-radius: 10px;
+    padding: 12px 26px; text-align: left; }
+  .controls b { color: #ffd23e; display: inline-block; min-width: 132px; }
+  .screen .fine { margin-top: 18px; font-size: 12px; color: rgba(255,255,255,.55); }
+  #overlay-title { font-size: 64px; }
+  #overlay-text { max-width: 560px; font-size: 17px; line-height: 1.5; }
+  #loading { position: fixed; inset: 0; z-index: 20; display: flex; align-items: center;
+    justify-content: center; background: #0b0e1a; font-size: 18px; letter-spacing: 3px;
+    color: #ffd23e; }
+</style>
+</head>
+<body>
+<div id="loading">LOADING PORT MERIDIAN…</div>
+<canvas id="game"></canvas>
+
+<div id="hud" class="hidden">
+  <div id="objective-box"><div id="objective"></div><div id="objective-sub"></div></div>
+  <div id="top-right">
+    <div id="wanted"></div>
+    <div id="cash">$0</div>
+    <div id="clock">18:00</div>
+    <div id="radio"></div>
+  </div>
+  <div id="minimap-wrap"><canvas id="minimap" width="208" height="208"></canvas></div>
+  <div id="bottom-left">
+    <div class="bar-label">HEALTH</div><div class="bar"><div id="health-fill"></div></div>
+    <div class="bar-label">ARMOR</div><div class="bar"><div id="armor-fill"></div></div>
+  </div>
+  <div id="speed" class="hidden"><div id="speed-num">0</div><div id="speed-unit">MPH</div></div>
+  <div id="crosshair" class="hidden"></div>
+  <div id="hint" class="hidden"></div>
+  <div id="banner" class="hidden"><div id="banner-title"></div><div id="banner-sub"></div></div>
+  <div id="dialogue" class="hidden"><div id="dialogue-name"></div><div id="dialogue-text"></div></div>
+  <div id="toast" class="hidden"></div>
+</div>
+<div id="damage-flash"></div>
+
+<div id="menu" class="screen">
+  <h1>PORT<br><span class="gold">MERIDIAN</span></h1>
+  <h2>AN OPEN-WORLD CRIME STORY</h2>
+  <p class="story">Three years after the Meridian Job went wrong, wheelman <b>Rex Calloway</b> is
+  back in the city that betrayed him. Fixer <b>Mara Voss</b> has six jobs lined up — and Detective
+  <b>Hale</b> has the whole Meridian PD watching the streets. Steal cars, lose the cops,
+  settle scores, and finish what you started.</p>
+  <button class="btn" id="btn-new">▶ &nbsp;NEW GAME</button>
+  <button class="btn ghost hidden" id="btn-continue">CONTINUE — DAY <span id="continue-day">1</span></button>
+  <div class="controls">
+    <div><b>W A S D</b> move / drive &nbsp;·&nbsp; <b>Mouse</b> look &nbsp;·&nbsp; <b>Shift</b> sprint</div>
+    <div><b>E</b> steal / enter car &nbsp;·&nbsp; <b>Space</b> handbrake / jump</div>
+    <div><b>Click</b> shoot &nbsp;·&nbsp; <b>R</b> reload &nbsp;·&nbsp; <b>1 / 2</b> fists / pistol</div>
+    <div><b>Q</b> radio &nbsp;·&nbsp; <b>M</b> mute &nbsp;·&nbsp; <b>Esc</b> pause &nbsp;·&nbsp; <b>G</b> save</div>
+  </div>
+  <div class="fine">An original game. Port Meridian, its people and its story are invented — no real city, no borrowed names.</div>
+</div>
+
+<div id="pause-menu" class="screen hidden">
+  <h1 id="overlay-title" style="font-size:56px">PAUSED</h1>
+  <p class="story" id="overlay-text">The city waits for no one — except right now.</p>
+  <button class="btn" id="btn-resume">RESUME</button>
+  <button class="btn ghost" id="btn-save">SAVE GAME</button>
+  <button class="btn ghost" id="btn-quit">QUIT TO MENU</button>
+</div>
+
+<div id="end-screen" class="screen hidden">
+  <h1 id="end-title">BUSTED</h1>
+  <p class="story" id="end-text"></p>
+  <button class="btn" id="btn-respawn">BACK ON THE STREETS</button>
+  <button class="btn ghost" id="btn-end-menu">QUIT TO MENU</button>
+</div>
+
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
