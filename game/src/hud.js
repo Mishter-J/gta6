@@ -1,184 +1,286 @@
-// Port Meridian — the HUD: DOM readouts, the circular minimap, banners,
-// dialogue box, toasts and the context hint ("Press E to steal").
-
-import { CITY } from './config.js';
+// Port Meridian — hud.js
+// DOM overlay built entirely by this module: cash, wanted stars,
+// health, ammo, speed, mission objective + waypoint arrow/distance,
+// message toasts, a circular minimap canvas, and the menu / pause /
+// busted / wasted / complete screens. The controls line is set with
+// textContent and plain separators — no HTML entities, no <br> tags.
 
 export class HUD {
   constructor() {
-    this.el = {
-      hud: document.getElementById('hud'),
-      wanted: document.getElementById('wanted'),
-      cash: document.getElementById('cash'),
-      clock: document.getElementById('clock'),
-      radio: document.getElementById('radio'),
-      health: document.getElementById('health-fill'),
-      armor: document.getElementById('armor-fill'),
-      speed: document.getElementById('speed'),
-      speedNum: document.getElementById('speed-num'),
-      objective: document.getElementById('objective'),
-      objectiveSub: document.getElementById('objective-sub'),
-      minimap: document.getElementById('minimap'),
-      crosshair: document.getElementById('crosshair'),
-      hint: document.getElementById('hint'),
-      banner: document.getElementById('banner'),
-      bannerTitle: document.getElementById('banner-title'),
-      bannerSub: document.getElementById('banner-sub'),
-      dialogue: document.getElementById('dialogue'),
-      dialogueName: document.getElementById('dialogue-name'),
-      dialogueText: document.getElementById('dialogue-text'),
-      toast: document.getElementById('toast'),
-      damage: document.getElementById('damage-flash'),
-    };
-    this.mm = this.el.minimap.getContext('2d');
-    this.bannerTimer = null;
-    this.dialogueTimer = null;
-    this.toastTimer = null;
-    this.gameMinutes = 18 * 60; // the day starts at 18:00, golden hour
+    this.root = document.createElement('div');
+    this.root.id = 'pm-ui';
+    document.body.appendChild(this.root);
+
+    const style = document.createElement('style');
+    style.textContent = `
+      #pm-ui { position: fixed; inset: 0; pointer-events: none; font-family: Arial, Helvetica, sans-serif; color: #fff; z-index: 10; }
+      #pm-ui .topbar { position: absolute; top: 12px; left: 12px; right: 12px; display: flex; gap: 18px; font-size: 20px; font-weight: bold; text-shadow: 0 2px 4px #000; }
+      #pm-ui .topbar .stars { color: #ffd76a; letter-spacing: 2px; }
+      #pm-ui .healthbar { width: 130px; height: 12px; background: #222; border: 1px solid #fff; display: inline-block; vertical-align: middle; }
+      #pm-ui .healthbar i { display: block; height: 100%; background: #3fae5a; }
+      #pm-ui .objective { position: absolute; top: 52px; left: 12px; max-width: 520px; font-size: 16px; background: rgba(0,0,0,0.55); padding: 8px 12px; border-radius: 6px; line-height: 1.4; }
+      #pm-ui .objective .arrow { font-size: 22px; color: #ffd76a; }
+      #pm-ui .toast { position: absolute; bottom: 110px; left: 50%; transform: translateX(-50%); font-size: 19px; font-weight: bold; background: rgba(0,0,0,0.65); padding: 10px 18px; border-radius: 8px; display: none; text-align: center; max-width: 80%; }
+      #pm-ui #pm-minimap { position: absolute; right: 14px; bottom: 14px; width: 170px; height: 170px; border-radius: 50%; border: 3px solid rgba(255,255,255,0.85); background: rgba(10,14,20,0.85); }
+      #pm-ui .overlay { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; background: rgba(8,10,18,0.72); pointer-events: auto; text-align: center; }
+      #pm-ui .overlay h1 { font-size: 64px; margin: 0; letter-spacing: 6px; color: #ffd76a; text-shadow: 0 4px 18px #000; }
+      #pm-ui .overlay h2 { font-size: 30px; margin: 6px 0 18px 0; color: #fff; }
+      #pm-ui .overlay .sub { font-size: 18px; margin: 4px 0 20px 0; color: #ffe9b0; }
+      #pm-ui .overlay .controls { font-size: 15px; color: #ddd; margin: 18px 0 8px 0; max-width: 720px; line-height: 1.7; }
+      #pm-ui .overlay button { pointer-events: auto; font-size: 20px; font-weight: bold; padding: 12px 30px; margin: 6px; border: none; border-radius: 8px; background: #ffd76a; color: #222; cursor: pointer; }
+      #pm-ui .overlay button.secondary { background: #e8e8e8; }
+      #pm-ui .overlay button:disabled { opacity: 0.45; cursor: default; }
+      #pm-ui .hidden { display: none !important; }
+    `;
+    document.head.appendChild(style);
+
+    this.root.innerHTML = '';
+    // Top bar.
+    this.topbar = this._div('topbar');
+    this.cashEl = this._span('$0');
+    this.starsEl = this._span('', 'stars');
+    this.healthWrap = this._span('');
+    this.healthBar = document.createElement('span');
+    this.healthBar.className = 'healthbar';
+    this.healthFill = document.createElement('i');
+    this.healthBar.appendChild(this.healthFill);
+    this.healthWrap.appendChild(document.createTextNode('HP '));
+    this.healthWrap.appendChild(this.healthBar);
+    this.ammoEl = this._span('12 / 48');
+    this.speedEl = this._span('');
+    this.topbar.append(this.cashEl, this.starsEl, this.healthWrap, this.ammoEl, this.speedEl);
+    this.root.appendChild(this.topbar);
+
+    this.objectiveEl = this._div('objective');
+    this.root.appendChild(this.objectiveEl);
+
+    this.toastEl = this._div('toast');
+    this.root.appendChild(this.toastEl);
+
+    this.minimap = document.createElement('canvas');
+    this.minimap.id = 'pm-minimap';
+    this.minimap.width = 170;
+    this.minimap.height = 170;
+    this.root.appendChild(this.minimap);
+
+    // Menu overlay.
+    this.menuEl = this._overlay('menu');
+    const title = document.createElement('h1');
+    title.textContent = 'PORT MERIDIAN';
+    const sub = document.createElement('div');
+    sub.className = 'sub';
+    sub.textContent = 'An open-world crime story — Rex Calloway is back in town.';
+    this.btnNew = this._button('New Game', 'btn-new');
+    this.btnContinue = this._button('Continue', 'btn-continue');
+    const controls = document.createElement('div');
+    controls.className = 'controls';
+    controls.id = 'pm-controls';
+    controls.textContent = 'WASD / Arrows — Move and Drive · Mouse — Look and Fire · E — Enter / Exit Car · F — Fire · R — Reload · Space — Handbrake · P / Esc — Pause · M — Mute';
+    this.menuEl.append(title, sub, this.btnNew, this.btnContinue, controls);
+    this.root.appendChild(this.menuEl);
+
+    // Pause overlay.
+    this.pauseEl = this._overlay('pause');
+    const pauseTitle = document.createElement('h2');
+    pauseTitle.textContent = 'PAUSED';
+    this.btnResume = this._button('Resume', 'btn-resume');
+    this.btnRestart = this._button('Restart Mission', 'btn-restart');
+    this.btnSaveQuit = this._button('Save and Quit to Menu', 'btn-savequit');
+    this.btnSaveQuit.classList.add('secondary');
+    this.pauseEl.append(pauseTitle, this.btnResume, this.btnRestart, this.btnSaveQuit);
+    this.root.appendChild(this.pauseEl);
+
+    // Busted / wasted overlay.
+    this.endEl = this._overlay('end');
+    this.endTitle = document.createElement('h1');
+    this.endTitle.textContent = 'BUSTED';
+    this.endText = document.createElement('div');
+    this.endText.className = 'sub';
+    this.btnRetry = this._button('Retry Mission', 'btn-retry');
+    this.btnQuitMenu = this._button('Quit to Menu', 'btn-quit-menu');
+    this.btnQuitMenu.classList.add('secondary');
+    this.endEl.append(this.endTitle, this.endText, this.btnRetry, this.btnQuitMenu);
+    this.root.appendChild(this.endEl);
+
+    // Job complete overlay.
+    this.completeEl = this._overlay('complete');
+    const doneTitle = document.createElement('h1');
+    doneTitle.textContent = 'JOB COMPLETE';
+    this.completeText = document.createElement('div');
+    this.completeText.className = 'sub';
+    this.btnPlayAgain = this._button('Play Again', 'btn-playagain');
+    this.completeEl.append(doneTitle, this.completeText, this.btnPlayAgain);
+    this.root.appendChild(this.completeEl);
+
+    this._toastTimer = null;
+    this.showMenu(false);
   }
 
-  show() { this.el.hud.classList.remove('hidden'); }
-  hide() { this.el.hud.classList.add('hidden'); }
-
-  setObjective(title, sub) {
-    this.el.objective.textContent = title;
-    this.el.objectiveSub.textContent = sub ?? '';
+  _div(cls) {
+    const d = document.createElement('div');
+    if (cls) d.className = cls;
+    return d;
   }
 
-  showBanner(title, sub, ms = 2600) {
-    this.el.bannerTitle.textContent = title;
-    this.el.bannerSub.textContent = sub ?? '';
-    this.el.banner.classList.remove('hidden');
-    clearTimeout(this.bannerTimer);
-    this.bannerTimer = setTimeout(() => this.el.banner.classList.add('hidden'), ms);
+  _span(text, cls) {
+    const s = document.createElement('span');
+    if (cls) s.className = cls;
+    s.textContent = text;
+    return s;
   }
 
-  showDialogue(name, text, seconds = 6) {
-    this.el.dialogueName.textContent = name;
-    this.el.dialogueText.textContent = text;
-    this.el.dialogue.classList.remove('hidden');
-    clearTimeout(this.dialogueTimer);
-    this.dialogueTimer = setTimeout(() => this.el.dialogue.classList.add('hidden'), seconds * 1000);
+  _overlay(name) {
+    const d = this._div('overlay hidden');
+    d.id = `pm-${name}`;
+    return d;
   }
 
-  hideDialogue() {
-    clearTimeout(this.dialogueTimer);
-    this.el.dialogue.classList.add('hidden');
+  _button(label, id) {
+    const b = document.createElement('button');
+    b.id = id;
+    b.textContent = label;
+    return b;
   }
 
-  showToast(text, ms = 3000) {
-    this.el.toast.textContent = text;
-    this.el.toast.classList.remove('hidden');
-    clearTimeout(this.toastTimer);
-    this.toastTimer = setTimeout(() => this.el.toast.classList.add('hidden'), ms);
+  _hideAllOverlays() {
+    for (const el of [this.menuEl, this.pauseEl, this.endEl, this.completeEl]) {
+      el.classList.add('hidden');
+    }
   }
 
-  showHint(html) {
-    this.el.hint.innerHTML = html;
-    this.el.hint.classList.remove('hidden');
+  showMenu(canContinue) {
+    this._hideAllOverlays();
+    this.menuEl.classList.remove('hidden');
+    this.btnContinue.disabled = !canContinue;
+    this.topbar.classList.add('hidden');
+    this.objectiveEl.classList.add('hidden');
+    this.minimap.classList.add('hidden');
   }
 
-  hideHint() { this.el.hint.classList.add('hidden'); }
-
-  flashDamage() {
-    this.el.damage.style.opacity = '1';
-    setTimeout(() => { this.el.damage.style.opacity = '0'; }, 130);
+  showPlaying() {
+    this._hideAllOverlays();
+    this.topbar.classList.remove('hidden');
+    this.objectiveEl.classList.remove('hidden');
+    this.minimap.classList.remove('hidden');
   }
 
-  /** Per-frame HUD refresh. state: {cash, health, armor, wanted, speedMph, inCar, armed, radio} */
-  update(dt, state) {
-    this.gameMinutes += dt * 2.2; // game clock runs faster than real time
-    const mins = Math.floor(this.gameMinutes) % (24 * 60);
-    const hh = String(Math.floor(mins / 60)).padStart(2, '0');
-    const mm = String(mins % 60).padStart(2, '0');
-    this.el.clock.textContent = `${hh}:${mm}`;
+  showPause() {
+    this._hideAllOverlays();
+    this.pauseEl.classList.remove('hidden');
+  }
+
+  showEnd(kind, text) {
+    this._hideAllOverlays();
+    this.endTitle.textContent = kind === 'busted' ? 'BUSTED' : 'WASTED';
+    this.endText.textContent = text || '';
+    this.endEl.classList.remove('hidden');
+  }
+
+  showComplete(text) {
+    this._hideAllOverlays();
+    this.completeText.textContent = text || '';
+    this.completeEl.classList.remove('hidden');
+  }
+
+  toast(msg, ms) {
+    this.toastEl.textContent = msg;
+    this.toastEl.style.display = 'block';
+    if (this._toastTimer) clearTimeout(this._toastTimer);
+    this._toastTimer = setTimeout(() => {
+      this.toastEl.style.display = 'none';
+    }, ms || 3500);
+  }
+
+  update(s) {
+    this.cashEl.textContent = `$${s.cash}`;
     let stars = '';
-    for (let i = 0; i < 5; i++) {
-      stars += i < state.wanted ? '★' : '<span class="off">★</span>';
+    for (let i = 0; i < 5; i++) stars += i < s.wanted ? '★' : '☆';
+    this.starsEl.textContent = stars;
+    this.healthFill.style.width = `${Math.max(0, Math.min(100, s.health))}%`;
+    this.ammoEl.textContent = `${s.mag} / ${s.reserve}`;
+    this.speedEl.textContent = s.inCar ? `${Math.round(s.speedKmh)} MPH` : '';
+    let obj = s.objective || '';
+    if (s.waypointDist != null) {
+      const arrow = this._arrowChar(s.waypointAngle);
+      obj += `  ${arrow} ${Math.round(s.waypointDist)}m`;
     }
-    this.el.wanted.innerHTML = stars;
-    this.el.cash.textContent = `$${state.cash.toLocaleString('en-US')}`;
-    this.el.health.style.width = `${Math.max(0, state.health)}%`;
-    this.el.armor.style.width = `${Math.max(0, state.armor)}%`;
-    this.el.radio.textContent = state.radio ?? '';
-    if (state.inCar) {
-      this.el.speed.classList.remove('hidden');
-      this.el.speedNum.textContent = String(Math.round(state.speedMph));
-    } else {
-      this.el.speed.classList.add('hidden');
-    }
-    if (state.armed && !state.inCar) this.el.crosshair.classList.remove('hidden');
-    else this.el.crosshair.classList.add('hidden');
+    this.objectiveEl.textContent = obj;
+    this._drawMinimap(s);
   }
 
-  /** Top-down minimap: roads, beach, player, mission marker, cops, cars. */
-  drawMinimap(world, playerPos, playerHeading, missionMarker, taxiMarker, copCars, footCops, cars, playerCar) {
-    const g = this.mm;
-    const W = 208, H = 208;
-    const S = CITY.size;
-    const scale = W / (S + 80);
-    const toX = (x) => (x + 40) * scale;
-    const toY = (z) => (z + 40) * scale;
-    g.clearRect(0, 0, W, H);
-    // Background: city blocks
-    g.fillStyle = '#1a2436';
-    g.fillRect(0, 0, W, H);
-    // Beach + water
-    g.fillStyle = '#e8cf9e';
-    g.fillRect(0, toY(S), W, H - toY(S));
-    g.fillStyle = '#1e6f8e';
-    g.fillRect(0, toY(S + 24), W, H - toY(S + 24));
-    // Roads
-    g.fillStyle = '#3a3f4a';
-    for (let i = 0; i <= CITY.blocks; i++) {
-      const v = toX(i * CITY.pitch);
-      g.fillRect(v - 3, 0, 6, toY(S));
-      g.fillRect(0, v - 3, toX(S), 6);
+  _arrowChar(angle) {
+    if (angle == null) return '◆';
+    // angle: relative bearing, 0 = ahead. 8-way arrow.
+    const dirs = ['▲', '↗', '▶', '↘', '▼', '↙', '◀', '↖'];
+    const idx = Math.round(((angle % (Math.PI * 2)) + Math.PI * 2) / (Math.PI / 4)) % 8;
+    return dirs[idx];
+  }
+
+  _drawMinimap(s) {
+    const c = this.minimap.getContext('2d');
+    if (!c) return;
+    const W = 170;
+    const H = 170;
+    const cx = W / 2;
+    const cy = H / 2;
+    const scale = W / 320; // city 300 wide -> fits
+    c.clearRect(0, 0, W, H);
+    c.fillStyle = 'rgba(20,26,34,0.9)';
+    c.beginPath();
+    c.arc(cx, cy, 84, 0, Math.PI * 2);
+    c.fill();
+    c.save();
+    c.beginPath();
+    c.arc(cx, cy, 84, 0, Math.PI * 2);
+    c.clip();
+    const toMap = (x, z) => [cx + x * scale, cy + z * scale];
+    // Roads.
+    c.strokeStyle = '#5a6068';
+    c.lineWidth = 5;
+    for (const r of [-120, -80, -40, 0, 40, 80, 120]) {
+      const [x1, y1] = toMap(r, -150);
+      const [x2, y2] = toMap(r, 150);
+      c.beginPath(); c.moveTo(x1, y1); c.lineTo(x2, y2); c.stroke();
+      const [x3, y3] = toMap(-150, r);
+      const [x4, y4] = toMap(150, r);
+      c.beginPath(); c.moveTo(x3, y3); c.lineTo(x4, y4); c.stroke();
     }
-    // Mission marker (yellow diamond)
-    const blip = (x, z, color, r) => {
-      g.fillStyle = color;
-      g.beginPath();
-      g.arc(toX(x), toY(z), r, 0, Math.PI * 2);
-      g.fill();
-      g.strokeStyle = '#000';
-      g.lineWidth = 1.5;
-      g.stroke();
-    };
-    if (missionMarker) blip(missionMarker.x, missionMarker.z, '#ffd23e', 6);
-    if (taxiMarker) blip(taxiMarker.x, taxiMarker.z, '#2ecc71', 5);
-    // Cars (white dots) and cops (flashing blue/red)
-    for (const car of cars) {
-      if (car.dead) continue;
-      if (car.police) {
-        const t = Math.floor(performance.now() / 300) % 2 === 0;
-        blip(car.pos.x, car.pos.z, t ? '#ff2020' : '#2040ff', 4);
-      } else {
-        g.fillStyle = 'rgba(255,255,255,0.75)';
-        g.fillRect(toX(car.pos.x) - 2, toY(car.pos.z) - 2, 4, 4);
-      }
+    // Waypoint.
+    if (s.waypoint) {
+      const [wx, wy] = toMap(s.waypoint.x, s.waypoint.z);
+      c.fillStyle = '#ffd76a';
+      c.beginPath(); c.arc(wx, wy, 6, 0, Math.PI * 2); c.fill();
+      c.strokeStyle = '#fff';
+      c.lineWidth = 1.5;
+      c.stroke();
     }
-    for (const cop of footCops) {
-      if (cop.dead) continue;
-      blip(cop.pos.x, cop.pos.z, '#4a90ff', 3);
+    // Taxi fare.
+    if (s.taxi && s.taxi.visible) {
+      const [tx, ty] = toMap(s.taxi.x, s.taxi.z);
+      c.fillStyle = '#ffe14a';
+      c.beginPath(); c.arc(tx, ty, 4, 0, Math.PI * 2); c.fill();
     }
-    void world;
-    // Player arrow
-    const px = toX(playerPos.x), py = toY(playerPos.z);
-    g.save();
-    g.translate(px, py);
-    g.rotate(playerHeading);
-    g.fillStyle = '#fff';
-    g.strokeStyle = '#000';
-    g.lineWidth = 1.5;
-    g.beginPath();
-    g.moveTo(0, -8);
-    g.lineTo(5.5, 6);
-    g.lineTo(0, 3);
-    g.lineTo(-5.5, 6);
-    g.closePath();
-    g.fill();
-    g.stroke();
-    g.restore();
-    void playerCar;
+    // Police dots.
+    c.fillStyle = '#5aa2ff';
+    for (const cop of s.cops || []) {
+      const [px, py] = toMap(cop.x, cop.z);
+      c.beginPath(); c.arc(px, py, 3.5, 0, Math.PI * 2); c.fill();
+    }
+    // Player arrow (rotates with heading); car icon when driving.
+    const [px, py] = toMap(s.playerX, s.playerZ);
+    c.save();
+    c.translate(px, py);
+    c.rotate(-s.heading + Math.PI);
+    if (s.inCar) {
+      c.fillStyle = '#ff4444';
+      c.fillRect(-4, -7, 8, 14);
+    } else {
+      c.fillStyle = '#ffffff';
+      c.beginPath();
+      c.moveTo(0, -8); c.lineTo(5, 6); c.lineTo(-5, 6); c.closePath();
+      c.fill();
+    }
+    c.restore();
+    c.restore();
   }
 }

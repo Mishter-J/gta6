@@ -1,38 +1,49 @@
-// Port Meridian — saving to localStorage: cash, mission progress,
-// health and position. Nothing leaves the browser.
+// Port Meridian — save.js
+// localStorage save/load: cash, mission index and best stats.
+// Start screen offers New Game / Continue; the pause menu can
+// save-and-quit. Mission completion auto-saves. New Game resets.
 
-import { WORLD } from './config.js';
+import { CONFIG } from './config.js';
 
-export function saveGame(state) {
-  try {
-    const data = {
-      cash: state.cash,
-      missionIndex: state.missionIndex,
-      health: state.health,
-      armor: state.armor,
-      x: state.x,
-      z: state.z,
-      savedAt: new Date().toISOString(),
-    };
-    localStorage.setItem(WORLD.saveKey, JSON.stringify(data));
-    return true;
-  } catch {
-    return false;
+export class SaveSys {
+  constructor() {
+    this.key = CONFIG.saveKey;
   }
-}
 
-export function loadGame() {
-  try {
-    const raw = localStorage.getItem(WORLD.saveKey);
-    if (!raw) return null;
-    const data = JSON.parse(raw);
-    if (typeof data.cash !== 'number' || typeof data.missionIndex !== 'number') return null;
-    return data;
-  } catch {
-    return null;
+  save(data) {
+    try {
+      const record = {
+        cash: data.cash || 0,
+        missionIndex: data.missionIndex || 0,
+        bestCash: data.bestCash || 0,
+        savedAt: Date.now(),
+      };
+      localStorage.setItem(this.key, JSON.stringify(record));
+      return true;
+    } catch (err) {
+      return false;
+    }
   }
-}
 
-export function hasSave() {
-  return loadGame() !== null;
+  load() {
+    try {
+      const raw = localStorage.getItem(this.key);
+      if (!raw) return null;
+      const data = JSON.parse(raw);
+      if (typeof data.cash !== 'number' || typeof data.missionIndex !== 'number') return null;
+      return data;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  has() {
+    return this.load() !== null;
+  }
+
+  clear() {
+    try {
+      localStorage.removeItem(this.key);
+    } catch (err) {}
+  }
 }

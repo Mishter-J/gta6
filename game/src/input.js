@@ -1,105 +1,83 @@
-// Port Meridian — keyboard + mouse input with pointer lock.
-// Tracks held keys, accumulated mouse deltas and edge-triggered presses.
+// Port Meridian — input.js
+// Keyboard + mouse state. Fires are counted, never collapsed: every
+// mousedown (or F press) pushes one entry onto the click queue, and
+// combat consumes up to 3 per frame, so rapid clicks each count as a
+// shot. Clicks on DOM buttons (menu / pause) never reach the queue,
+// and the queue is cleared whenever play starts, so a menu click can
+// never leak into gameplay as a stray shot.
 
 export class Input {
-  constructor(canvas) {
-    this.canvas = canvas;
+  constructor() {
     this.keys = new Set();
-    this.pressed = new Set();   // keys pressed since last poll()
+    this.just = new Set();
+    this.clicks = [];
     this.mouseDX = 0;
     this.mouseDY = 0;
-    this.mouseDown = false;
-    this.mouseClicked = false;  // left button pressed since last poll()
-    this.clickCount = 0;        // left clicks since last poll() (a count, not a flag)
-    this.locked = false;
-    this.dragging = false;
-    this.lastX = 0;
-    this.lastY = 0;
-    this.onFirstGesture = null; // called once on the first key/click
+    this.attached = false;
+  }
 
+  attach() {
+    if (this.attached) return;
+    this.attached = true;
     window.addEventListener('keydown', (e) => {
-      if (e.repeat) return;
-      this._gesture();
+      if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
+      if (!e.repeat) {
+        this.just.add(e.code);
+        if (e.code === 'KeyF') this.clicks.push(1);
+      }
       this.keys.add(e.code);
-      this.pressed.add(e.code);
-      if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab'].includes(e.code)) e.preventDefault();
     });
-    window.addEventListener('keyup', (e) => this.keys.delete(e.code));
-    window.addEventListener('blur', () => { this.keys.clear(); this.mouseDown = false; });
-
-    document.addEventListener('pointerlockchange', () => {
-      this.locked = document.pointerLockElement === canvas;
+    window.addEventListener('keyup', (e) => {
+      this.keys.delete(e.code);
     });
-    document.addEventListener('mousemove', (e) => {
-      if (this.locked) {
-        this.mouseDX += e.movementX;
-        this.mouseDY += e.movementY;
-      } else if (this.dragging) {
-        this.mouseDX += e.clientX - this.lastX;
-        this.mouseDY += e.clientY - this.lastY;
-        this.lastX = e.clientX;
-        this.lastY = e.clientY;
-      }
+    window.addEventListener('blur', () => {
+      this.keys.clear();
     });
-    canvas.addEventListener('mousedown', (e) => {
-      this._gesture();
-      if (e.button === 0) {
-        this.mouseDown = true;
-        this.mouseClicked = true;
-        this.clickCount++;
-        if (!this.locked && this.lockEnabled) {
-          { const r = canvas.requestPointerLock(); if (r && r.catch) r.catch(() => {}); }
-        } else if (!this.lockEnabled) {
-          this.dragging = true;
-          this.lastX = e.clientX;
-          this.lastY = e.clientY;
-        }
-      }
+    // Only clicks whose target is the game canvas count as fire.
+    // Button clicks (menu, pause, overlays) are ignored entirely.
+    window.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      const t = e.target;
+      if (t && t.closest && t.closest('button')) return;
+      if (t && t.tagName && t.tagName !== 'CANVAS' && t.tagName !== 'BODY') return;
+      this.clicks.push(1);
     });
-    window.addEventListener('mouseup', (e) => {
-      if (e.button === 0) { this.mouseDown = false; this.dragging = false; }
+    window.addEventListener('mousemove', (e) => {
+      this.mouseDX += e.movementX || 0;
+      this.mouseDY += e.movementY || 0;
     });
-    canvas.addEventListener('contextmenu', (e) => e.preventDefault());
-    this.lockEnabled = true; // screenshots can disable pointer lock
   }
 
-  _gesture() {
-    if (this.onFirstGesture) {
-      const cb = this.onFirstGesture;
-      this.onFirstGesture = null;
-      cb();
-    }
+  down(code) {
+    return this.keys.has(code);
   }
 
-  down(code) { return this.keys.has(code); }
-  wasPressed(code) { return this.pressed.has(code); }
-
-  /** Forward axis: W/Up = +1, S/Down = -1. */
-  forwardAxis() {
-    let v = 0;
-    if (this.down('KeyW') || this.down('ArrowUp')) v += 1;
-    if (this.down('KeyS') || this.down('ArrowDown')) v -= 1;
-    return v;
+  pressed(code) {
+    return this.just.has(code);
   }
 
-  /** Strafe axis: D/Right = +1, A/Left = -1. */
-  strafeAxis() {
-    let v = 0;
-    if (this.down('KeyD') || this.down('ArrowRight')) v += 1;
-    if (this.down('KeyA') || this.down('ArrowLeft')) v -= 1;
-    return v;
+  // Number of queued fire clicks; consumes the queue.
+  consumeClicks() {
+    const n = this.clicks.length;
+    this.clicks.length = 0;
+    return n;
   }
 
-  /** Call once per frame after reading input: clears edge triggers. */
-  poll() {
-    const out = { dx: this.mouseDX, dy: this.mouseDY, clicked: this.mouseClicked, clicks: this.clickCount };
+  clearClicks() {
+    this.clicks.length = 0;
+  }
+
+  consumeMouse() {
+    const dx = this.mouseDX;
+    const dy = this.mouseDY;
     this.mouseDX = 0;
     this.mouseDY = 0;
-    this.mouseClicked = false;
-    this.clickCount = 0;
-    return out;
+    return { dx, dy };
   }
 
-  /** Call at the end of the frame: clears edge-triggered key presses. */
-  clearPressed() { this.pressed = new Set(); }
+  endFrame() {
+    this.just.clear();
+    this.mouseDX = 0;
+    this.mouseDY = 0;
+  }
 }
