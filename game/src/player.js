@@ -1,186 +1,225 @@
-// Port Meridian — player.js
-// Rex Calloway on foot and behind the wheel. Third-person character
-// (simple capsule figure), walk/run with camera-relative WASD, mouse
-// orbit camera, chase camera while driving. E near a car steals /
-// enters it (proximity ~6.5u, driver seated); E again exits beside
-// the car. Entering a car that was never stolen before is a crime:
-// the steal callback raises the wanted level by one star.
+// player.js — Rex Calloway on foot and behind the wheel: third-person
+// movement, mouse-orbit camera, entering / exiting cars (E), and the
+// chase camera while driving.
 
-import * as THREE from '../vendor/three.module.min.js';
-import { CONFIG, clamp, lerp, dist2, headingVec, angDiff } from './config.js';
-import { resolveCircle } from './world.js';
-
-function makeFigureMesh() {
-  const g = new THREE.Group();
-  const jacket = new THREE.MeshLambertMaterial({ color: 0x2e4a6b });
-  const skin = new THREE.MeshLambertMaterial({ color: 0xc89878 });
-  const pants = new THREE.MeshLambertMaterial({ color: 0x23262b });
-  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.42, 0.9, 4, 10), jacket);
-  body.position.y = 1.15;
-  g.add(body);
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.32, 12, 10), skin);
-  head.position.y = 2.05;
-  g.add(head);
-  const cap = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.16, 0.55), pants);
-  cap.position.y = 2.28;
-  g.add(cap);
-  for (const sx of [-0.18, 0.18]) {
-    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.75, 0.26), pants);
-    leg.position.set(sx, 0.38, 0);
-    g.add(leg);
-  }
-  return g;
-}
+import * as THREE from 'three';
+import { CONFIG, clamp, angleDiff, dist2D } from './config.js';
 
 export class Player {
-  constructor(scene, world, vehicles, input) {
-    this.scene = scene;
-    this.world = world;
-    this.vehicles = vehicles;
-    this.input = input;
-    this.mesh = makeFigureMesh();
-    scene.add(this.mesh);
-    this.x = CONFIG.playerSpawn.x;
-    this.z = CONFIG.playerSpawn.z;
-    this.heading = Math.PI;
-    this.camYaw = Math.PI;
+  constructor(ctx) {
+    this.ctx = ctx;
+    this.x = 0;
+    this.z = 0;
+    this.heading = 0; // facing direction, radians
+    this.camYaw = 0; // camera orbit yaw
     this.camPitch = 0.32;
-    this.inCar = false;
-    this.car = null;
-    this.walkPhase = 0;
-    this.reset();
+    this.health = CONFIG.playerHealth;
+    this.car = null; // Vehicle when driving, else null
+    this.lastDamageAt = -99;
+    this.group = this._buildMesh();
+    ctx.scene.add(this.group);
+    this.muzzle = new THREE.Object3D(); // gun tip anchor for tracers
+    this.muzzle.position.set(0.45, 1.35, 0.6);
+    this.group.add(this.muzzle);
   }
 
-  reset() {
-    this.x = CONFIG.playerSpawn.x;
-    this.z = CONFIG.playerSpawn.z;
-    this.heading = Math.PI;
-    this.camYaw = Math.PI;
-    this.camPitch = 0.32;
-    this.inCar = false;
-    this.car = null;
-    this.mesh.visible = true;
-    this.mesh.position.set(this.x, 0, this.z);
-    this.mesh.rotation.y = this.heading;
-  }
-
-  // Nearest usable car within enter radius, or null.
-  nearestCar() {
-    let best = null;
-    let bestD = Infinity;
-    for (const car of this.vehicles.list) {
-      if (car.wrecked) continue;
-      const d = dist2(this.x, this.z, car.x, car.z);
-      if (d < CONFIG.enterRadius && d < bestD) {
-        best = car;
-        bestD = d;
-      }
+  _buildMesh() {
+    const g = new THREE.Group();
+    const jacket = new THREE.MeshLambertMaterial({ color: 0x8a2a2a });
+    const pants = new THREE.MeshLambertMaterial({ color: 0x2a2a34 });
+    const skin = new THREE.MeshLambertMaterial({ color: 0xd8a077 });
+    const hair = new THREE.MeshLambertMaterial({ color: 0x1e1410 });
+    const legs = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.8, 0.36), pants);
+    legs.position.y = 0.4;
+    g.add(legs);
+    const torso = new THREE.Mesh(new THREE.BoxGeometry(0.78, 0.85, 0.42), jacket);
+    torso.position.y = 1.22;
+    g.add(torso);
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.26, 12, 10), skin);
+    head.position.y = 1.9;
+    g.add(head);
+    const cap = new THREE.Mesh(new THREE.SphereGeometry(0.27, 12, 8, 0, Math.PI * 2, 0, 1.1), hair);
+    cap.position.y = 1.94;
+    g.add(cap);
+    const armGeo = new THREE.BoxGeometry(0.2, 0.75, 0.2);
+    for (const sx of [-0.5, 0.5]) {
+      const arm = new THREE.Mesh(armGeo, jacket);
+      arm.position.set(sx, 1.22, 0);
+      g.add(arm);
     }
-    return best;
+    return g;
   }
 
-  // E near a car: enter it. Returns { entered, car, stole }.
-  // `stole` is true only the first time this car is taken.
-  tryEnterCar() {
-    if (this.inCar) return { entered: false, car: null, stole: false };
-    const car = this.nearestCar();
-    if (!car) return { entered: false, car: null, stole: false };
-    this.inCar = true;
-    this.car = car;
-    this.mesh.visible = false;
-    const stole = !car.stolen;
-    car.stolen = true;
-    return { entered: true, car, stole };
-  }
-
-  exitCar() {
-    if (!this.inCar || !this.car) return false;
-    const v = headingVec(this.car.heading);
-    // Step out on the car's left side.
-    const px = this.car.x - v.z * 2.6;
-    const pz = this.car.z + v.x * 2.6;
-    const fixed = resolveCircle(px, pz, 0.6, this.world);
-    this.x = fixed.x;
-    this.z = fixed.z;
-    this.heading = this.car.heading;
-    this.camYaw = this.car.heading;
-    this.inCar = false;
+  spawn(x, z, heading = 0) {
+    this.x = x;
+    this.z = z;
+    this.heading = heading;
+    this.camYaw = heading + Math.PI;
+    this.health = CONFIG.playerHealth;
     this.car = null;
-    this.mesh.visible = true;
-    this.mesh.position.set(this.x, 0, this.z);
-    this.mesh.rotation.y = this.heading;
+    this.group.visible = true;
+    this._syncMesh();
+  }
+
+  get pos() {
+    return this.car ? { x: this.car.x, z: this.car.z } : { x: this.x, z: this.z };
+  }
+
+  get speed() {
+    return this.car ? Math.abs(this.car.speed) : 0;
+  }
+
+  get driving() {
+    return !!this.car;
+  }
+
+  damage(amount) {
+    if (this.ctx.state !== 'playing') return;
+    this.health -= amount;
+    this.lastDamageAt = this.ctx.time;
+    if (this.health <= 0) {
+      this.health = 0;
+      this.ctx.setState('wasted');
+    }
+  }
+
+  heal(dt) {
+    // Slow regen after 6 quiet seconds.
+    if (this.ctx.time - this.lastDamageAt > 6 && this.health > 0 && this.health < CONFIG.playerHealth) {
+      this.health = Math.min(CONFIG.playerHealth, this.health + dt * 4);
+    }
+  }
+
+  enterCar(car) {
+    if (!car || car.wrecked) return false;
+    const wasParked = car.parked;
+    const wasTraffic = car.traffic;
+    car.traffic = false;
+    car.parked = false;
+    this.car = car;
+    this.group.visible = false;
+    this.ctx.audio.setEngine(0, true);
+    this.ctx.hud.toast(`Driving the ${car.name}`);
+    if (car.isPolice) this.ctx.police.addWanted(1, 'stole a police car');
+    else if (wasParked || wasTraffic || car.isComet) this.ctx.police.addWanted(1, 'stole a car');
     return true;
   }
 
-  update(dt, camera) {
-    const mouse = this.input.consumeMouse();
-    this.camYaw -= mouse.dx * 0.0032;
-    this.camPitch = clamp(this.camPitch + mouse.dy * 0.0022, -0.15, 0.9);
-
-    if (this.inCar && this.car) {
-      this.car.drive(dt, this.input, this.world);
-      this.x = this.car.x;
-      this.z = this.car.z;
-      this.heading = this.car.heading;
-      this._updateCamera(camera, dt, true);
-      return this.car.speed;
-    }
-
-    // On foot: camera-relative WASD, Shift to run.
-    let mx = 0;
-    let mz = 0;
-    if (this.input.down('KeyW') || this.input.down('ArrowUp')) mz += 1;
-    if (this.input.down('KeyS') || this.input.down('ArrowDown')) mz -= 1;
-    if (this.input.down('KeyA') || this.input.down('ArrowLeft')) mx -= 1;
-    if (this.input.down('KeyD') || this.input.down('ArrowRight')) mx += 1;
-    const moving = mx !== 0 || mz !== 0;
-    const run = this.input.down('ShiftLeft') || this.input.down('ShiftRight');
-    const speed = run ? CONFIG.runSpeed : CONFIG.walkSpeed;
-    if (moving) {
-      const len = Math.sqrt(mx * mx + mz * mz);
-      mx /= len;
-      mz /= len;
-      // Camera-relative: forward is where the camera looks.
-      const fx = Math.sin(this.camYaw);
-      const fz = Math.cos(this.camYaw);
-      const rx = Math.cos(this.camYaw);
-      const rz = -Math.sin(this.camYaw);
-      const dx = fx * mz + rx * mx;
-      const dz = fz * mz + rz * mx;
-      const nx = this.x + dx * speed * dt;
-      const nz = this.z + dz * speed * dt;
-      const fixed = resolveCircle(nx, nz, 0.6, this.world);
-      this.x = fixed.x;
-      this.z = fixed.z;
-      const targetHeading = Math.atan2(dx, dz);
-      const diff = angDiff(targetHeading, this.heading);
-      this.heading += clamp(diff, -8 * dt, 8 * dt);
-      this.walkPhase += dt * speed * 1.6;
-      this.mesh.position.y = Math.abs(Math.sin(this.walkPhase)) * 0.06;
-    } else {
-      this.mesh.position.y = 0;
-    }
-    this.mesh.position.set(this.x, this.mesh.position.y, this.z);
-    this.mesh.rotation.y = this.heading;
-    this._updateCamera(camera, dt, false);
-    return moving ? speed : 0;
+  exitCar() {
+    if (!this.car) return;
+    const car = this.car;
+    this.car = null;
+    // Step out to the driver's side.
+    const side = { x: Math.cos(car.heading), z: -Math.sin(car.heading) };
+    this.x = car.x + side.x * 2.4;
+    this.z = car.z + side.z * 2.4;
+    const fixed = this.ctx.world.resolveCircle(this.x, this.z, 0.8);
+    this.x = fixed.x;
+    this.z = fixed.z;
+    this.heading = car.heading;
+    this.group.visible = true;
+    this._syncMesh();
+    this.ctx.audio.setEngine(0, false);
   }
 
-  _updateCamera(camera, dt, driving) {
-    const dist = driving ? 13 : 9;
-    const height = driving ? 5.2 : 4.2;
-    // While driving the camera eases behind the car's heading.
-    const wantYaw = driving ? this.heading : this.camYaw;
-    if (driving) {
-      const diff = angDiff(wantYaw, this.camYaw);
-      this.camYaw += diff * Math.min(1, dt * 2.2);
+  update(dt) {
+    const { input, world } = this.ctx;
+    if (this.ctx.state !== 'playing') return;
+    const mouse = input.takeMouseDelta();
+    this.camYaw -= mouse.dx * 0.0032;
+    this.camPitch = clamp(this.camPitch + mouse.dy * 0.0022, 0.08, 1.1);
+
+    if (this.car) {
+      this._updateDriving(dt);
+      return;
     }
-    const cx = this.x - Math.sin(this.camYaw) * dist * Math.cos(this.camPitch);
-    const cz = this.z - Math.cos(this.camYaw) * dist * Math.cos(this.camPitch);
-    const cy = height + Math.sin(this.camPitch) * dist;
-    camera.position.x = lerp(camera.position.x, cx, Math.min(1, dt * 10));
-    camera.position.y = lerp(camera.position.y, cy, Math.min(1, dt * 10));
-    camera.position.z = lerp(camera.position.z, cz, Math.min(1, dt * 10));
-    camera.lookAt(this.x, driving ? 1.6 : 1.5, this.z);
+    const axes = input.moveAxes();
+    const run = input.running();
+    const speed = run ? CONFIG.runSpeed : CONFIG.walkSpeed;
+    if (axes.x !== 0 || axes.y !== 0) {
+      // Movement is camera-relative: forward is away from the camera.
+      const fwdX = -Math.sin(this.camYaw);
+      const fwdZ = -Math.cos(this.camYaw);
+      const rightX = Math.cos(this.camYaw);
+      const rightZ = -Math.sin(this.camYaw);
+      let mx = fwdX * axes.y + rightX * axes.x;
+      let mz = fwdZ * axes.y + rightZ * axes.x;
+      const len = Math.hypot(mx, mz) || 1;
+      mx /= len;
+      mz /= len;
+      const nx = this.x + mx * speed * dt;
+      const nz = this.z + mz * speed * dt;
+      const fixed = world.resolveCircle(nx, nz, 0.8);
+      this.x = clamp(fixed.x, -CONFIG.worldBound, CONFIG.waterStart - 4);
+      this.z = clamp(fixed.z, -CONFIG.worldBound, CONFIG.worldBound);
+      this.heading = Math.atan2(mx, mz);
+      // Simple walk bob.
+      this.group.position.y = Math.abs(Math.sin(this.ctx.time * (run ? 11 : 7))) * 0.06;
+    } else {
+      this.group.position.y = 0;
+    }
+    this._syncMesh();
+    this.heal(dt);
+  }
+
+  _updateDriving(dt) {
+    const { input } = this.ctx;
+    const axes = input.moveAxes();
+    let throttle = axes.y;
+    let steer = -axes.x;
+    if (input.down('Space')) {
+      // Handbrake: strong decel, sharper turn.
+      this.car.speed *= Math.max(0, 1 - dt * 3.5);
+      steer *= 1.6;
+      throttle = 0;
+    }
+    this.car.drive(dt, throttle, steer);
+    this.ctx.audio.setEngine(Math.abs(this.car.speed) / this.car.topSpeed, true);
+    // Hitting a pedestrian while driving is a crime.
+    for (const ped of this.ctx.pedestrians.list) {
+      if (ped.fleeing) continue;
+      if (dist2D(this.car.x, this.car.z, ped.x, ped.z) < 2.4 && Math.abs(this.car.speed) > 4) {
+        ped.hitByCar(this.car);
+        this.ctx.police.addWanted(1, 'hit a pedestrian');
+        this.ctx.hud.toast('You hit a pedestrian!');
+      }
+    }
+  }
+
+  _syncMesh() {
+    this.group.position.x = this.x;
+    this.group.position.z = this.z;
+    this.group.rotation.y = this.heading;
+  }
+
+  // Camera: third-person follow on foot, chase cam while driving.
+  updateCamera(dt) {
+    const { camera } = this.ctx;
+    const target = this.car
+      ? new THREE.Vector3(this.car.x, 1.4, this.car.z)
+      : new THREE.Vector3(this.x, 1.6, this.z);
+    let yaw;
+    let dist;
+    let height;
+    if (this.car) {
+      // Chase cam: behind the car, lerps to follow its heading.
+      const wantYaw = this.car.heading + Math.PI;
+      const d = angleDiff(this.ctx.camChaseYaw ?? wantYaw, wantYaw);
+      this.ctx.camChaseYaw = (this.ctx.camChaseYaw ?? wantYaw) + d * Math.min(1, dt * 3);
+      yaw = this.ctx.camChaseYaw;
+      dist = 10.5;
+      height = 4.2;
+    } else {
+      yaw = this.camYaw;
+      dist = 7.5;
+      height = 3.2;
+    }
+    const pitch = this.car ? 0.24 : this.camPitch;
+    const cx = target.x + Math.sin(yaw) * Math.cos(pitch) * dist;
+    const cz = target.z + Math.cos(yaw) * Math.cos(pitch) * dist;
+    const cy = target.y + Math.sin(pitch) * dist + height * 0.35;
+    const desired = new THREE.Vector3(cx, Math.max(cy, 1.2), cz);
+    camera.position.lerp(desired, Math.min(1, dt * 8));
+    camera.lookAt(target);
   }
 }

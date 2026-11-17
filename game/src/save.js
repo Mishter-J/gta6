@@ -1,24 +1,34 @@
-// Port Meridian — save.js
-// localStorage save/load: cash, mission index and best stats.
-// Start screen offers New Game / Continue; the pause menu can
-// save-and-quit. Mission completion auto-saves. New Game resets.
+// save.js — Port Meridian saves: cash, mission progress and best stats
+// in localStorage. The start screen offers New Game / Continue; the
+// pause menu offers save-and-quit; Busted / Wasted screens retry from
+// the last save.
 
-import { CONFIG } from './config.js';
+const SAVE_KEY = 'portmeridian.save.v1';
 
 export class SaveSys {
-  constructor() {
-    this.key = CONFIG.saveKey;
+  constructor(ctx) {
+    this.ctx = ctx;
   }
 
-  save(data) {
+  // Plain data object; main.js owns the live fields.
+  snapshot() {
+    const ctx = this.ctx;
+    return {
+      version: 1,
+      cash: ctx.cash,
+      missionIndex: ctx.missions.index,
+      vipersDown: ctx.missions.vipersDown,
+      bestCash: Math.max(ctx.bestCash || 0, ctx.cash),
+      missionsDone: ctx.missions.index,
+      savedAt: new Date().toISOString(),
+    };
+  }
+
+  save() {
     try {
-      const record = {
-        cash: data.cash || 0,
-        missionIndex: data.missionIndex || 0,
-        bestCash: data.bestCash || 0,
-        savedAt: Date.now(),
-      };
-      localStorage.setItem(this.key, JSON.stringify(record));
+      const data = this.snapshot();
+      localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+      this.ctx.bestCash = data.bestCash;
       return true;
     } catch (err) {
       return false;
@@ -27,23 +37,35 @@ export class SaveSys {
 
   load() {
     try {
-      const raw = localStorage.getItem(this.key);
+      const raw = localStorage.getItem(SAVE_KEY);
       if (!raw) return null;
       const data = JSON.parse(raw);
-      if (typeof data.cash !== 'number' || typeof data.missionIndex !== 'number') return null;
+      if (!data || data.version !== 1) return null;
       return data;
     } catch (err) {
       return null;
     }
   }
 
-  has() {
+  hasSave() {
     return this.load() !== null;
+  }
+
+  apply(data) {
+    const ctx = this.ctx;
+    ctx.cash = data.cash || 0;
+    ctx.bestCash = data.bestCash || 0;
+    ctx.missions.index = Math.min(data.missionIndex || 0, 6);
+    ctx.missions.vipersDown = 0;
+    ctx.missions.stage = 'go';
+    ctx.missions.taxi = null;
   }
 
   clear() {
     try {
-      localStorage.removeItem(this.key);
-    } catch (err) {}
+      localStorage.removeItem(SAVE_KEY);
+    } catch (err) {
+      /* storage may be unavailable in some embeds */
+    }
   }
 }

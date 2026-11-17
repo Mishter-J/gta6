@@ -1,247 +1,366 @@
-// Port Meridian — vehicles.js
-// Cars: the red sports car "Comet", parked cars and AI traffic cars.
-// Arcade physics — acceleration, drag, steering scaled by speed,
-// handbrake, building collision (stop + damage), a damage model where
-// wrecked cars smoke and become unusable. Traffic cars follow
-// rectangular road loops and brake for the car ahead.
+// vehicles.js — Port Meridian cars: the red sports car "Comet", parked
+// cars to steal, AI traffic driving the road grid, arcade physics with
+// building collision, damage and wreck smoke.
 
-import * as THREE from '../vendor/three.module.min.js';
-import { CONFIG, makeRng, clamp, dist2, headingVec, angDiff } from './config.js';
-import { resolveCircle } from './world.js';
+import * as THREE from 'three';
+import { CONFIG, clamp, mulberry32, pick, roadLines, dist2D } from './config.js';
 
-export function makeCarMesh(color, sporty) {
-  const group = new THREE.Group();
-  const paint = new THREE.MeshLambertMaterial({ color });
-  const glass = new THREE.MeshLambertMaterial({ color: 0x18222e });
-  const bodyH = sporty ? 0.75 : 1.0;
-  const bodyL = sporty ? 4.6 : 4.2;
-  const body = new THREE.Mesh(new THREE.BoxGeometry(2.0, bodyH, bodyL), paint);
-  body.position.y = 0.75;
-  group.add(body);
-  const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.7, sporty ? 2.0 : 2.2), glass);
-  cabin.position.set(0, 1.35, sporty ? -0.2 : 0);
-  group.add(cabin);
-  // Seated driver figure, always visible inside the cabin.
-  const driver = new THREE.Mesh(
-    new THREE.BoxGeometry(0.55, 0.7, 0.4),
-    new THREE.MeshLambertMaterial({ color: 0x3a2f28 }),
-  );
-  driver.position.set(-0.4, 1.25, 0.3);
-  group.add(driver);
-  const wheelGeo = new THREE.CylinderGeometry(0.38, 0.38, 0.3, 10);
-  const wheelMat = new THREE.MeshLambertMaterial({ color: 0x141414 });
-  for (const [wx, wz] of [[-0.95, 1.45], [0.95, 1.45], [-0.95, -1.45], [0.95, -1.45]]) {
-    const w = new THREE.Mesh(wheelGeo, wheelMat);
-    w.rotation.z = Math.PI / 2;
-    w.position.set(wx, 0.38, wz);
-    group.add(w);
-  }
-  // Headlights.
-  const lightMat = new THREE.MeshBasicMaterial({ color: 0xfff2b0 });
-  for (const wx of [-0.6, 0.6]) {
-    const hl = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.18, 0.1), lightMat);
-    hl.position.set(wx, 0.8, bodyL / 2 + 0.02);
-    group.add(hl);
-  }
-  return group;
-}
+const CAR_COLORS = [0xc0c0c8, 0x2a4a7a, 0x7a2a2a, 0x2a7a4a, 0xd8b13a, 0x8a8a92, 0x3a3a42, 0xe8e0d0];
+const CAR_NAMES = ['Vento', 'Kestrel', 'Bison', 'Marlin', 'Pinto', 'Falcon', 'Dune', 'Sable'];
 
 export class Vehicle {
-  constructor(scene, opts) {
-    this.scene = scene;
+  constructor(ctx, opts) {
+    this.ctx = ctx;
+    this.name = opts.name || 'car';
+    this.color = opts.color;
+    this.isComet = !!opts.isComet;
+    this.isPolice = !!opts.isPolice;
     this.x = opts.x;
     this.z = opts.z;
     this.heading = opts.heading || 0;
     this.speed = 0;
-    this.color = opts.color;
-    this.isComet = !!opts.isComet;
-    this.isTraffic = !!opts.isTraffic;
-    this.name = opts.name || 'Car';
-    this.damage = 0;
+    this.topSpeed = opts.topSpeed || CONFIG.carTopSpeed;
+    this.health = CONFIG.carHealth;
     this.wrecked = false;
-    this.stolen = false;
-    this.maxSpeed = this.isComet ? CONFIG.cometMaxSpeed : CONFIG.carMaxSpeed;
-    this.mesh = makeCarMesh(opts.color, this.isComet);
-    this.mesh.position.set(this.x, 0, this.z);
-    this.mesh.rotation.y = this.heading;
-    scene.add(this.mesh);
-    // Traffic loop: rectangle of road waypoints.
-    this.waypoints = opts.waypoints || null;
-    this.wpIndex = 0;
-    this.smoke = null;
+    this.traffic = !!opts.traffic; // AI-driven
+    this.parked = !!opts.parked;
+    this.steer = 0;
+    this.smoking = false;
+    this.smokeTimer = 0;
+    this.routeAxis = 'x';
+    this.routeDir = 1;
+    this.routeLine = opts.z;
+    this.group = this._buildMesh();
+    this.group.position.set(this.x, 0, this.z);
+    this.group.rotation.y = this.heading;
+    ctx.scene.add(this.group);
   }
 
-  speedKmh() {
-    return Math.abs(this.speed) * 2.2;
-  }
-
-  // Player driving: W/S accelerate and brake/reverse, A/D steer,
-  // Space handbrake. Steering scales with speed so the car stays
-  // controllable at low speed and stable at high speed.
-  drive(dt, input, world) {
-    if (this.wrecked) {
-      this.speed = 0;
-      return;
+  _buildMesh() {
+    const g = new THREE.Group();
+    const bodyMat = new THREE.MeshLambertMaterial({ color: this.color });
+    const darkMat = new THREE.MeshLambertMaterial({ color: 0x181a1e });
+    const glassMat = new THREE.MeshLambertMaterial({ color: 0x9ac8e8 });
+    const body = new THREE.Mesh(new THREE.BoxGeometry(2, 0.75, 4.4), bodyMat);
+    body.position.y = 0.65;
+    g.add(body);
+    const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.65, 2.2), glassMat);
+    cabin.position.set(0, 1.3, -0.2);
+    g.add(cabin);
+    const wheelGeo = new THREE.CylinderGeometry(0.42, 0.42, 0.3, 10);
+    wheelGeo.rotateZ(Math.PI / 2);
+    for (const [wx, wz] of [[-1.0, 1.45], [1.0, 1.45], [-1.0, -1.45], [1.0, -1.45]]) {
+      const w = new THREE.Mesh(wheelGeo, darkMat);
+      w.position.set(wx, 0.42, wz);
+      g.add(w);
     }
-    const fwd = input.down('KeyW') || input.down('ArrowUp');
-    const back = input.down('KeyS') || input.down('ArrowDown');
-    const left = input.down('KeyA') || input.down('ArrowLeft');
-    const right = input.down('KeyD') || input.down('ArrowRight');
-    const brake = input.down('Space');
-    if (fwd) this.speed += CONFIG.carAccel * dt;
-    if (back) {
-      if (this.speed > 0.5) this.speed -= CONFIG.carBrake * dt;
-      else this.speed -= CONFIG.carAccel * 0.55 * dt;
+    // Headlights + taillights.
+    const lightGeo = new THREE.BoxGeometry(0.4, 0.2, 0.1);
+    const headMat = new THREE.MeshBasicMaterial({ color: 0xfff2b0 });
+    const tailMat = new THREE.MeshBasicMaterial({ color: 0xff2222 });
+    for (const sx of [-0.6, 0.6]) {
+      const h = new THREE.Mesh(lightGeo, headMat);
+      h.position.set(sx, 0.7, 2.21);
+      g.add(h);
+      const t = new THREE.Mesh(lightGeo, tailMat);
+      t.position.set(sx, 0.7, -2.21);
+      g.add(t);
     }
-    if (brake) this.speed -= Math.sign(this.speed) * CONFIG.carBrake * 1.4 * dt;
-    // Drag + rolling resistance.
-    this.speed -= this.speed * 0.55 * dt;
-    if (!fwd && !back && Math.abs(this.speed) < 0.6) this.speed = 0;
-    this.speed = clamp(this.speed, -CONFIG.carReverseSpeed, this.maxSpeed);
-    const steerAmount = (left ? 1 : 0) - (right ? 1 : 0);
-    if (steerAmount !== 0 && Math.abs(this.speed) > 0.5) {
-      const dir = this.speed >= 0 ? 1 : -1;
-      const scale = clamp(Math.abs(this.speed) / 14, 0.35, 1);
-      this.heading += steerAmount * CONFIG.carSteer * scale * dir * dt;
-    }
-    this._integrate(dt, world);
-  }
-
-  _integrate(dt, world) {
-    const v = headingVec(this.heading);
-    const nx = this.x + v.x * this.speed * dt;
-    const nz = this.z + v.z * this.speed * dt;
-    const before = { x: this.x, z: this.z };
-    const fixed = resolveCircle(nx, nz, 2.1, world);
-    const hit = Math.abs(fixed.x - nx) > 0.01 || Math.abs(fixed.z - nz) > 0.01;
-    if (hit && Math.abs(this.speed) > 6) {
-      this.damage += Math.abs(this.speed) * 1.2;
-      if (this.damage >= 100) this._wreck();
-    }
-    if (hit) this.speed *= 0.25;
-    this.x = fixed.x;
-    this.z = fixed.z;
-    this.mesh.position.set(this.x, 0, this.z);
-    this.mesh.rotation.y = this.heading;
-    if (this.wrecked) this._smokeTick(dt);
-    return before;
-  }
-
-  _wreck() {
-    this.wrecked = true;
-    this.speed = 0;
-    if (!this.smoke) {
-      const smoke = new THREE.Mesh(
-        new THREE.SphereGeometry(1.4, 8, 6),
-        new THREE.MeshBasicMaterial({ color: 0x555555, transparent: true, opacity: 0.55 }),
+    if (this.isPolice) {
+      const bar = new THREE.Mesh(
+        new THREE.BoxGeometry(1.2, 0.25, 0.5),
+        new THREE.MeshBasicMaterial({ color: 0x2244ff }),
       );
-      smoke.position.y = 1.6;
-      this.mesh.add(smoke);
-      this.smoke = smoke;
+      bar.position.set(0, 1.75, -0.2);
+      g.add(bar);
+      const stripe = new THREE.Mesh(
+        new THREE.BoxGeometry(2.02, 0.3, 4.42),
+        new THREE.MeshBasicMaterial({ color: 0xffffff }),
+      );
+      stripe.position.y = 0.66;
+      g.add(stripe);
+    }
+    if (this.isComet) {
+      const spoiler = new THREE.Mesh(new THREE.BoxGeometry(1.9, 0.12, 0.4), darkMat);
+      spoiler.position.set(0, 1.15, -2.1);
+      g.add(spoiler);
+    }
+    // Wreck smoke: a dark sphere that grows when the car is wrecked.
+    this.smoke = new THREE.Mesh(
+      new THREE.SphereGeometry(1.4, 8, 6),
+      new THREE.MeshLambertMaterial({ color: 0x333333, transparent: true, opacity: 0.0 }),
+    );
+    this.smoke.position.y = 1.6;
+    g.add(this.smoke);
+    return g;
+  }
+
+  forward() {
+    return { x: Math.sin(this.heading), z: Math.cos(this.heading) };
+  }
+
+  // Arcade driving step. throttle -1..1, steer -1..1 (positive = right).
+  drive(dt, throttle, steer) {
+    if (this.wrecked) return;
+    const fwd = this.forward();
+    const targetAccel = throttle * CONFIG.carAccel;
+    this.speed += targetAccel * dt;
+    // Drag + rolling resistance.
+    this.speed -= this.speed * CONFIG.carDrag * dt;
+    if (Math.abs(throttle) < 0.05 && Math.abs(this.speed) < 0.4) this.speed = 0;
+    this.speed = clamp(this.speed, -CONFIG.carTopSpeed * 0.45, this.topSpeed);
+    // Steering scales with speed and fades at a standstill.
+    const steerAuthority = clamp(Math.abs(this.speed) / 8, 0, 1);
+    this.heading += steer * CONFIG.carTurnRate * steerAuthority * dt * Math.sign(this.speed || 1);
+    const ox = this.x;
+    const oz = this.z;
+    const nx = this.x + Math.sin(this.heading) * this.speed * dt;
+    const nz = this.z + Math.cos(this.heading) * this.speed * dt;
+    const hit = this._collide(nx, nz);
+    if (hit) {
+      // A clean slide along the wall keeps its speed; only a dead stop
+      // against a wall counts as a crash, and a glancing one costs
+      // little — the car must survive the trip to Mara's garage.
+      const moved = Math.hypot(this.x - ox, this.z - oz);
+      const intended = Math.abs(this.speed) * dt || 0.001;
+      if (moved < intended * 0.5) {
+        const impact = Math.abs(this.speed);
+        if (impact > 12) {
+          this.damage((impact - 12) * 0.5);
+          this.ctx.audio.crash();
+          this.ctx.hud.toast('Crash!');
+        }
+        this.speed *= 0.5;
+      }
+    }
+    this._syncMesh();
+    if (this.smoking) {
+      this.smokeTimer += dt;
+      this.smoke.material.opacity = 0.25 + 0.2 * Math.sin(this.smokeTimer * 9);
+      this.smoke.scale.setScalar(1 + 0.4 * Math.sin(this.smokeTimer * 5));
     }
   }
 
-  _smokeTick(dt) {
-    if (!this.smoke) return;
-    const s = 1.2 + Math.sin(performance.now() * 0.006) * 0.3;
-    this.smoke.scale.set(s, s, s);
+  // Returns true when a building was hit; position is corrected.
+  // Wall slide: when the full step is blocked, try each axis alone so
+  // the car glides along the wall instead of wedging on its corner.
+  _collide(nx, nz) {
+    const world = this.ctx.world;
+    const full = world.resolveCircle(nx, nz, 2.1);
+    const hit = full.x !== nx || full.z !== nz;
+    if (!hit) {
+      this.x = nx;
+      this.z = nz;
+    } else {
+      const xTry = world.resolveCircle(nx, this.z, 2.1);
+      const zTry = world.resolveCircle(this.x, nz, 2.1);
+      const xProg = Math.abs(xTry.x - this.x) + Math.abs(xTry.z - this.z);
+      const zProg = Math.abs(zTry.x - this.x) + Math.abs(zTry.z - this.z);
+      if (xProg >= zProg) { this.x = xTry.x; this.z = xTry.z; }
+      else { this.x = zTry.x; this.z = zTry.z; }
+    }
+    // Keep cars inside the world bounds (beach is drivable, water is not).
+    const b = CONFIG.worldBound;
+    this.x = clamp(this.x, -b, CONFIG.waterStart - 4);
+    this.z = clamp(this.z, -b, b);
+    return hit;
   }
 
-  // AI traffic: follow the rectangular loop, brake if the car ahead
-  // (the player's car or another car) is too close.
-  updateTraffic(dt, world, playerCar) {
-    if (this.wrecked || !this.waypoints) return;
-    const target = this.waypoints[this.wpIndex];
-    const dx = target.x - this.x;
-    const dz = target.z - this.z;
-    const d = Math.sqrt(dx * dx + dz * dz);
-    if (d < 4) {
-      this.wpIndex = (this.wpIndex + 1) % this.waypoints.length;
-      return;
+  damage(amount) {
+    if (this.wrecked) return;
+    this.health -= amount;
+    if (this.health <= 30 && !this.smoking) this.smoking = true;
+    if (this.health <= 0) {
+      this.wrecked = true;
+      this.speed = 0;
+      this.smoking = true;
+      this.smoke.material.opacity = 0.6;
     }
-    const want = Math.atan2(dx, dz);
-    const turn = angDiff(want, this.heading);
-    this.heading += clamp(turn, -1.6 * dt, 1.6 * dt);
-    let targetSpeed = 13;
-    if (playerCar && !playerCar.wrecked) {
-      const pd = dist2(this.x, this.z, playerCar.x, playerCar.z);
-      if (pd < 10) targetSpeed = 0;
-    }
-    this.speed += clamp(targetSpeed - this.speed, -20 * dt, 12 * dt);
-    this._integrate(dt, world);
   }
 
-  reset(x, z, heading) {
-    this.x = x;
-    this.z = z;
-    this.heading = heading;
-    this.speed = 0;
-    this.damage = 0;
+  repair() {
+    this.health = CONFIG.carHealth;
     this.wrecked = false;
-    if (this.smoke) {
-      this.mesh.remove(this.smoke);
-      this.smoke = null;
-    }
-    this.mesh.position.set(x, 0, z);
-    this.mesh.rotation.y = heading;
+    this.smoking = false;
+    this.smoke.material.opacity = 0;
+  }
+
+  _syncMesh() {
+    this.group.position.set(this.x, 0, this.z);
+    this.group.rotation.y = this.heading;
+  }
+
+  remove() {
+    this.ctx.scene.remove(this.group);
   }
 }
 
-function roadLoop(rng, road) {
-  const other = CONFIG.roads[Math.floor(rng.next() * CONFIG.roads.length)];
-  const a = road;
-  const b = other;
-  return [
-    { x: a, z: -120 },
-    { x: a, z: b },
-    { x: 110, z: b },
-    { x: 110, z: -120 },
-  ];
-}
-
-export function createVehicles(scene, world) {
-  const rng = makeRng(CONFIG.seed + 7);
-  const list = [];
-  const comet = new Vehicle(scene, {
-    x: CONFIG.cometPos.x,
-    z: CONFIG.cometPos.z,
-    heading: CONFIG.cometPos.heading,
-    color: CONFIG.colors.comet,
-    isComet: true,
-    name: 'Comet',
-  });
-  list.push(comet);
-
-  const parkedColors = [0x2e6fb0, 0xe0a030, 0x4a9e5c, 0x8a8f96, 0x6a4a9e, 0xc0c4c8];
-  const parkedSpots = [
-    { x: 40, z: 24, heading: 0 },
-    { x: -40, z: -24, heading: Math.PI },
-    { x: 80, z: 60, heading: Math.PI / 2 },
-    { x: -80, z: -60, heading: -Math.PI / 2 },
-    { x: 0, z: 100, heading: Math.PI },
-    { x: 120, z: 20, heading: -Math.PI / 2 },
-  ];
-  for (let i = 0; i < parkedSpots.length; i++) {
-    const s = parkedSpots[i];
-    list.push(new Vehicle(scene, {
-      x: s.x, z: s.z, heading: s.heading,
-      color: parkedColors[i % parkedColors.length],
-      name: 'Sedan',
-    }));
+export class VehicleManager {
+  constructor(ctx) {
+    this.ctx = ctx;
+    this.vehicles = [];
+    this.comet = null;
+    this.rng = mulberry32(CONFIG.seed + 7);
   }
 
-  const traffic = [];
-  for (let i = 0; i < 8; i++) {
-    const road = CONFIG.roads[1 + Math.floor(rng.next() * (CONFIG.roads.length - 2))];
-    const car = new Vehicle(scene, {
-      x: road, z: -110 + rng.range(0, 60), heading: 0,
-      color: parkedColors[Math.floor(rng.next() * parkedColors.length)],
-      isTraffic: true,
-      name: 'Traffic',
-      waypoints: roadLoop(rng, road),
+  build() {
+    const rng = this.rng;
+    const lines = roadLines();
+    // The red sports car "Comet" — mission 1's target, parked by the plaza.
+    this.comet = this.addCar({
+      name: 'Comet',
+      color: 0xd21f2b,
+      isComet: true,
+      parked: true,
+      x: 52,
+      z: 36,
+      heading: Math.PI / 2,
+      topSpeed: 36,
     });
-    list.push(car);
-    traffic.push(car);
+    // Parked cars scattered on roadsides.
+    for (let i = 0; i < 10; i++) {
+      const horizontal = rng() > 0.5;
+      const line = pick(rng, lines);
+      const along = -260 + rng() * 520;
+      const lane = (rng() > 0.5 ? 1 : -1) * (CONFIG.roadWidth / 2 + 2.5);
+      this.addCar({
+        name: pick(rng, CAR_NAMES),
+        color: pick(rng, CAR_COLORS),
+        parked: true,
+        x: horizontal ? along : line + lane,
+        z: horizontal ? line + lane : along,
+        heading: horizontal ? (rng() > 0.5 ? Math.PI / 2 : -Math.PI / 2) : rng() > 0.5 ? 0 : Math.PI,
+      });
+    }
+    // Traffic: AI cars already rolling on the roads.
+    for (let i = 0; i < 12; i++) {
+      const horizontal = rng() > 0.5;
+      const line = pick(rng, lines);
+      const along = -260 + rng() * 520;
+      const car = this.addCar({
+        name: pick(rng, CAR_NAMES),
+        color: pick(rng, CAR_COLORS),
+        traffic: true,
+        x: horizontal ? along : line,
+        z: horizontal ? line : along,
+        heading: horizontal ? (rng() > 0.5 ? Math.PI / 2 : -Math.PI / 2) : rng() > 0.5 ? 0 : Math.PI,
+        topSpeed: 12 + rng() * 6,
+      });
+      car.routeAxis = horizontal ? 'x' : 'z';
+      car.routeDir = rng() > 0.5 ? 1 : -1;
+      car.routeLine = line;
+    }
   }
-  return { list, comet, traffic };
+
+  addCar(opts) {
+    const car = new Vehicle(this.ctx, opts);
+    this.vehicles.push(car);
+    return car;
+  }
+
+  removeCar(car) {
+    car.remove();
+    this.vehicles = this.vehicles.filter((v) => v !== car);
+  }
+
+  // Nearest drivable (not wrecked) car within `maxDist` of (x, z).
+  nearestCar(x, z, maxDist) {
+    let best = null;
+    let bestD = maxDist;
+    for (const v of this.vehicles) {
+      if (v.wrecked) continue;
+      const d = dist2D(x, z, v.x, v.z);
+      if (d < bestD) {
+        bestD = d;
+        best = v;
+      }
+    }
+    return best;
+  }
+
+  update(dt) {
+    for (const v of this.vehicles) {
+      if (v.traffic && !v.wrecked) this._driveTraffic(v, dt);
+    }
+    // Soft car-vs-car separation (cheap circle push).
+    for (let i = 0; i < this.vehicles.length; i++) {
+      for (let j = i + 1; j < this.vehicles.length; j++) {
+        const a = this.vehicles[i];
+        const b = this.vehicles[j];
+        const dx = b.x - a.x;
+        const dz = b.z - a.z;
+        const d2 = dx * dx + dz * dz;
+        if (d2 < 16 && d2 > 0.001) {
+          const d = Math.sqrt(d2);
+          const push = (4 - d) / 2;
+          const px = (dx / d) * push;
+          const pz = (dz / d) * push;
+          if (!a.traffic || a === this.ctx.player.car) { a.x -= px; a.z -= pz; }
+          if (!b.traffic || b === this.ctx.player.car) { b.x += px; b.z += pz; }
+          a._syncMesh();
+          b._syncMesh();
+        }
+      }
+    }
+  }
+
+  _driveTraffic(car, dt) {
+    // Follow the current road line; at intersections, sometimes turn.
+    const lines = roadLines();
+    const speedTarget = car.topSpeed * 0.8;
+    const fwd = car.forward();
+    // Lane offset: keep right.
+    let tx = car.x;
+    let tz = car.z;
+    if (car.routeAxis === 'x') {
+      tz = car.routeLine + 3.5 * car.routeDir;
+      tx = car.x + car.routeDir * speedTarget * dt * 2;
+    } else {
+      tx = car.routeLine + 3.5 * car.routeDir;
+      tz = car.z + car.routeDir * speedTarget * dt * 2;
+    }
+    // Steer toward the lane: blend heading toward the route direction.
+    const wantHeading = car.routeAxis === 'x'
+      ? (car.routeDir > 0 ? Math.PI / 2 : -Math.PI / 2)
+      : (car.routeDir > 0 ? 0 : Math.PI);
+    let dh = wantHeading - car.heading;
+    while (dh > Math.PI) dh -= Math.PI * 2;
+    while (dh < -Math.PI) dh += Math.PI * 2;
+    car.heading += THREE.MathUtils.clamp(dh, -1.2 * dt, 1.2 * dt);
+    // Slow for the player / other cars ahead.
+    const aheadX = car.x + fwd.x * 10;
+    const aheadZ = car.z + fwd.z * 10;
+    let blocked = false;
+    const player = this.ctx.player;
+    if (player && dist2D(aheadX, aheadZ, player.x, player.z) < 5) blocked = true;
+    for (const v of this.vehicles) {
+      if (v !== car && dist2D(aheadX, aheadZ, v.x, v.z) < 5) { blocked = true; break; }
+    }
+    const target = blocked ? 0 : speedTarget;
+    car.speed += (target - car.speed) * Math.min(1, dt * 1.5);
+    const nx = car.x + Math.sin(car.heading) * car.speed * dt;
+    const nz = car.z + Math.cos(car.heading) * car.speed * dt;
+    // Stay on the road: if the next step leaves the road grid, turn around.
+    const onRoad = (x, z) => {
+      for (const l of lines) {
+        if (Math.abs(x - l) < CONFIG.roadWidth / 2 + 1 || Math.abs(z - l) < CONFIG.roadWidth / 2 + 1) return true;
+      }
+      return false;
+    };
+    if (!onRoad(nx, nz) && Math.abs(nx) < CONFIG.cityHalf && Math.abs(nz) < CONFIG.cityHalf) {
+      // Reached a block corner: maybe turn onto the crossing road.
+      if (this.rng() < 0.5) {
+        car.routeAxis = car.routeAxis === 'x' ? 'z' : 'x';
+        car.routeDir = this.rng() > 0.5 ? 1 : -1;
+        car.routeLine = car.routeAxis === 'x' ? car.z : car.x;
+      } else {
+        car.routeDir *= -1;
+      }
+    }
+    car.x = THREE.MathUtils.clamp(nx, -CONFIG.cityHalf, CONFIG.cityHalf);
+    car.z = THREE.MathUtils.clamp(nz, -CONFIG.cityHalf, CONFIG.cityHalf);
+    const hit = car._collide(car.x, car.z);
+    if (hit) car.speed *= 0.4;
+    car._syncMesh();
+  }
 }

@@ -1,118 +1,214 @@
-// Port Meridian — pedestrians.js
-// Walkers on the sidewalks, wandering between waypoints along the
-// roads. They flee from gunfire and from the player's car, and they
-// keep to the sidewalks so they read as city life, not obstacles.
+// pedestrians.js — Port Meridian walkers: they stroll the sidewalks
+// between waypoints, flee from gunfire and from the player's car, and
+// can be hit (a crime). One marked walker offers the taxi side activity.
 
-import * as THREE from '../vendor/three.module.min.js';
-import { CONFIG, makeRng } from './config.js';
-import { resolveCircle } from './world.js';
+import * as THREE from 'three';
+import { CONFIG, mulberry32, pick, roadLines, dist2D } from './config.js';
 
-const SHIRTS = [0xc25a4a, 0x4a7ac2, 0x53a05a, 0xd0b040, 0x8a5ac2, 0xc27a9a, 0x5ac2b0];
+const SHIRT_COLORS = [0x4a7a9a, 0x9a4a4a, 0x4a9a5a, 0xd8a03a, 0x7a4a9a, 0x3a3a3a, 0xe8e8e8];
 
-function makeWalkerMesh(color) {
-  const g = new THREE.Group();
-  const shirt = new THREE.MeshLambertMaterial({ color });
-  const skin = new THREE.MeshLambertMaterial({ color: 0xc89878 });
-  const pants = new THREE.MeshLambertMaterial({ color: 0x2a2d33 });
-  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.36, 0.8, 4, 8), shirt);
-  body.position.y = 1.05;
-  g.add(body);
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.28, 10, 8), skin);
-  head.position.y = 1.9;
-  g.add(head);
-  for (const sx of [-0.15, 0.15]) {
-    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.7, 0.22), pants);
-    leg.position.set(sx, 0.35, 0);
-    g.add(leg);
+export class Pedestrian {
+  constructor(ctx, opts) {
+    this.ctx = ctx;
+    this.x = opts.x;
+    this.z = opts.z;
+    this.heading = opts.heading || 0;
+    this.speed = 1.2 + ctx.rng() * 0.9;
+    this.isViper = !!opts.isViper; // gang shooter (mission 4)
+    this.health = this.isViper ? 100 : 50;
+    this.alive = true;
+    this.fleeing = false;
+    this.fleeTimer = 0;
+    this.target = this._pickWaypoint();
+    this.shootCooldown = 0;
+    this.isTaxi = !!opts.isTaxi;
+    this.group = this._buildMesh();
+    this.group.position.set(this.x, 0, this.z);
+    ctx.scene.add(this.group);
   }
-  return g;
+
+  _buildMesh() {
+    const g = new THREE.Group();
+    const shirt = new THREE.MeshLambertMaterial({
+      color: this.isViper ? 0x1a1a1a : pick(this.ctx.rng, SHIRT_COLORS),
+    });
+    const pants = new THREE.MeshLambertMaterial({ color: 0x2a2a34 });
+    const skin = new THREE.MeshLambertMaterial({ color: 0xc89868 });
+    const legs = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.7, 0.3), pants);
+    legs.position.y = 0.35;
+    g.add(legs);
+    const torso = new THREE.Mesh(new THREE.BoxGeometry(0.66, 0.75, 0.36), shirt);
+    torso.position.y = 1.08;
+    g.add(torso);
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.23, 10, 8), skin);
+    head.position.y = 1.68;
+    g.add(head);
+    if (this.isViper) {
+      // Vipers carry a visible gun and a red bandana.
+      const gun = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, 0.7), new THREE.MeshLambertMaterial({ color: 0x111111 }));
+      gun.position.set(0.4, 1.1, 0.3);
+      g.add(gun);
+      const band = new THREE.Mesh(new THREE.BoxGeometry(0.48, 0.12, 0.48), new THREE.MeshLambertMaterial({ color: 0xcc2222 }));
+      band.position.y = 1.78;
+      g.add(band);
+    }
+    if (this.isTaxi) {
+      // Taxi customer waves: a floating yellow marker.
+      const marker = new THREE.Mesh(
+        new THREE.ConeGeometry(0.4, 0.9, 6),
+        new THREE.MeshBasicMaterial({ color: 0xffd21f }),
+      );
+      marker.position.y = 2.6;
+      marker.rotation.x = Math.PI;
+      g.add(marker);
+      this.taxiMarker = marker;
+    }
+    return g;
+  }
+
+  _pickWaypoint() {
+    const lines = roadLines();
+    const line = pick(this.ctx.rng, lines);
+    const along = -260 + this.ctx.rng() * 520;
+    const side = this.ctx.rng() > 0.5 ? 1 : -1;
+    if (this.ctx.rng() > 0.5) return { x: along, z: line + side * (CONFIG.roadWidth / 2 + 2.5) };
+    return { x: line + side * (CONFIG.roadWidth / 2 + 2.5), z: along };
+  }
+
+  fleeFrom(x, z) {
+    if (!this.alive || this.isViper) return;
+    this.fleeing = true;
+    this.fleeTimer = 3 + this.ctx.rng() * 2;
+    // Run directly away from the threat.
+    const dx = this.x - x;
+    const dz = this.z - z;
+    const d = Math.hypot(dx, dz) || 1;
+    this.target = { x: this.x + (dx / d) * 40, z: this.z + (dz / d) * 40 };
+  }
+
+  hitByCar(car) {
+    if (!this.alive) return;
+    this.alive = false;
+    // Knocked down: fall over and fade out.
+    this.group.rotation.x = -Math.PI / 2;
+    this.group.position.y = 0.4;
+    setTimeout(() => this._despawn(), 4000);
+  }
+
+  damage(amount, fromX, fromZ) {
+    if (!this.alive) return false;
+    this.health -= amount;
+    if (this.health <= 0) {
+      this.alive = false;
+      this.group.rotation.x = -Math.PI / 2;
+      this.group.position.y = 0.4;
+      setTimeout(() => this._despawn(), 4000);
+      return true; // killed
+    }
+    this.fleeFrom(fromX, fromZ);
+    return false;
+  }
+
+  _despawn() {
+    this.ctx.scene.remove(this.group);
+    this.ctx.pedestrians.list = this.ctx.pedestrians.list.filter((p) => p !== this);
+  }
+
+  update(dt) {
+    if (!this.alive) return;
+    if (this.fleeing) {
+      this.fleeTimer -= dt;
+      if (this.fleeTimer <= 0) {
+        this.fleeing = false;
+        this.target = this._pickWaypoint();
+      }
+    }
+    // Vipers hold their ground and shoot at the player instead of walking.
+    if (this.isViper) {
+      const p = this.ctx.player.pos;
+      const d = dist2D(this.x, this.z, p.x, p.z);
+      this.heading = Math.atan2(p.x - this.x, p.z - this.z);
+      this.shootCooldown -= dt;
+      if (d < 42 && this.shootCooldown <= 0 && this.ctx.state === 'playing') {
+        this.shootCooldown = 1.1 + this.ctx.rng() * 0.9;
+        this.ctx.combat.enemyShot(this);
+      }
+      this.group.rotation.y = this.heading;
+      return;
+    }
+    const speed = this.fleeing ? 5.5 : this.speed;
+    const dx = this.target.x - this.x;
+    const dz = this.target.z - this.z;
+    const d = Math.hypot(dx, dz);
+    if (d < 2) {
+      this.target = this._pickWaypoint();
+      return;
+    }
+    this.heading = Math.atan2(dx, dz);
+    const nx = this.x + (dx / d) * speed * dt;
+    const nz = this.z + (dz / d) * speed * dt;
+    const fixed = this.ctx.world.resolveCircle(nx, nz, 0.7);
+    this.x = fixed.x;
+    this.z = fixed.z;
+    this.group.position.set(this.x, Math.abs(Math.sin(this.ctx.time * 8)) * 0.05, this.z);
+    this.group.rotation.y = this.heading;
+    if (this.taxiMarker) {
+      this.taxiMarker.position.y = 2.6 + Math.sin(this.ctx.time * 5) * 0.25;
+    }
+  }
 }
 
-export class Pedestrians {
-  constructor(scene, world) {
-    this.scene = scene;
-    this.world = world;
-    this.walkers = [];
-    const rng = makeRng(CONFIG.seed + 21);
-    for (let i = 0; i < 24; i++) {
-      const road = CONFIG.roads[Math.floor(rng.next() * CONFIG.roads.length)];
-      const along = rng.range(-120, 120);
-      const side = rng.next() > 0.5 ? 1 : -1;
-      const horizontal = rng.next() > 0.5;
-      const x = horizontal ? along : road + side * 6.5;
-      const z = horizontal ? road + side * 6.5 : along;
-      const mesh = makeWalkerMesh(SHIRTS[i % SHIRTS.length]);
-      mesh.position.set(x, 0, z);
-      scene.add(mesh);
-      this.walkers.push({
-        x, z, mesh,
-        heading: rng.range(0, Math.PI * 2),
-        speed: rng.range(1.2, 2.4),
-        target: null,
-        fleeUntil: 0,
-        fleeX: 0,
-        fleeZ: 0,
-        phase: rng.range(0, 6),
-      });
-    }
-    this.time = 0;
+export class PedestrianManager {
+  constructor(ctx) {
+    this.ctx = ctx;
+    this.list = [];
+    this.rng = mulberry32(CONFIG.seed + 21);
   }
 
-  // A gunshot (or a near-miss car) makes nearby walkers flee.
-  scare(x, z, radius) {
-    for (const w of this.walkers) {
-      const dx = w.x - x;
-      const dz = w.z - z;
-      if (dx * dx + dz * dz < radius * radius) {
-        w.fleeUntil = this.time + 2.5;
-        w.fleeX = x;
-        w.fleeZ = z;
-      }
+  build() {
+    for (let i = 0; i < 24; i++) this.spawnWalker();
+  }
+
+  spawnWalker() {
+    const lines = roadLines();
+    const line = pick(this.rng, lines);
+    const along = -260 + this.rng() * 520;
+    const side = this.rng() > 0.5 ? 1 : -1;
+    const ped = new Pedestrian(this.ctx, {
+      x: this.rng() > 0.5 ? along : line + side * (CONFIG.roadWidth / 2 + 2.5),
+      z: this.rng() > 0.5 ? line + side * (CONFIG.roadWidth / 2 + 2.5) : along,
+    });
+    this.list.push(ped);
+    return ped;
+  }
+
+  spawnViper(x, z) {
+    const ped = new Pedestrian(this.ctx, { x, z, isViper: true });
+    this.list.push(ped);
+    return ped;
+  }
+
+  spawnTaxiCustomer(x, z) {
+    const ped = new Pedestrian(this.ctx, { x, z, isTaxi: true });
+    this.list.push(ped);
+    return ped;
+  }
+
+  // Everyone in earshot runs from a gunshot.
+  scareAll(x, z, radius = 45) {
+    for (const p of this.list) {
+      if (dist2D(x, z, p.x, p.z) < radius) p.fleeFrom(x, z);
     }
   }
 
-  update(dt, playerX, playerZ, playerSpeed) {
-    this.time += dt;
-    for (const w of this.walkers) {
-      let tx;
-      let tz;
-      let speed = w.speed;
-      if (this.time < w.fleeUntil) {
-        // Run directly away from the threat.
-        const dx = w.x - w.fleeX;
-        const dz = w.z - w.fleeZ;
-        const len = Math.max(0.001, Math.sqrt(dx * dx + dz * dz));
-        tx = w.x + (dx / len) * 10;
-        tz = w.z + (dz / len) * 10;
-        speed = 6;
-      } else {
-        if (!w.target) {
-          // Pick a new sidewalk waypoint along a random road.
-          const road = CONFIG.roads[Math.floor(Math.random() * CONFIG.roads.length)];
-          const along = (Math.random() * 240) - 120;
-          const side = Math.random() > 0.5 ? 6.5 : -6.5;
-          if (Math.random() > 0.5) w.target = { x: along, z: road + side };
-          else w.target = { x: road + side, z: along };
-        }
-        tx = w.target.x;
-        tz = w.target.z;
-      }
-      const dx = tx - w.x;
-      const dz = tz - w.z;
-      const d = Math.sqrt(dx * dx + dz * dz);
-      if (d < 1.5) {
-        w.target = null;
-        continue;
-      }
-      w.heading = Math.atan2(dx, dz);
-      const nx = w.x + (dx / d) * speed * dt;
-      const nz = w.z + (dz / d) * speed * dt;
-      const fixed = resolveCircle(nx, nz, 0.5, this.world);
-      w.x = fixed.x;
-      w.z = fixed.z;
-      w.phase += dt * speed * 2;
-      w.mesh.position.set(w.x, Math.abs(Math.sin(w.phase)) * 0.04, w.z);
-      w.mesh.rotation.y = w.heading;
-    }
+  vipersAlive() {
+    return this.list.filter((p) => p.isViper && p.alive).length;
+  }
+
+  update(dt) {
+    for (const p of [...this.list]) p.update(dt);
+    // Top the crowd back up.
+    const walkers = this.list.filter((p) => !p.isViper && p.alive).length;
+    if (walkers < 20 && this.ctx.state === 'playing') this.spawnWalker();
   }
 }

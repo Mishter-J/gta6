@@ -1,66 +1,64 @@
-// Port Meridian — config.js
-// Single source of tunable constants plus the seeded PRNG (mulberry32)
-// and small math helpers. The city layout is identical every load for
-// a given seed. No network, no outside data: everything here is local.
+// config.js — Port Meridian: single source of tunable constants plus the
+// seeded PRNG and small math helpers. The city layout is identical every
+// load for a given seed, so screenshots and playtests are reproducible.
 
 export const CONFIG = {
+  // World
   seed: 19489,
-  cityHalf: 150,
-  bounds: 145,
-  roadSpacing: 40,
-  roads: [-120, -80, -40, 0, 40, 80, 120],
-  roadWidth: 10,
-
-  // Player spawn and the red Comet sports car. The Comet sits on the
-  // x = 0 road facing the garage, so mission 1 is a straight drive.
-  playerSpawn: { x: 4, z: 24 },
-  cometPos: { x: 0, z: 20, heading: Math.PI },
-  garagePos: { x: 0, z: -80 },
-  garageRadius: 14,
-  enterRadius: 6.5,
-
-  // Mission markers (all on road intersections, reachable by car).
-  docksPos: { x: -120, z: 120 },
-  warehousePos: { x: 120, z: -40 },
-  dropPos: { x: 120, z: 120 },
-  bankPos: { x: 40, z: 40 },
-  towerPos: { x: 60, z: 60 },
-
+  cityHalf: 280, // playable city spans -280..280 on x and z
+  roadSpacing: 80, // distance between road centre lines
+  roadWidth: 14,
+  blockCount: 7, // 7x7 blocks between the roads
+  beachStart: 288, // beach strip east of the city
+  waterStart: 322,
+  worldBound: 340, // hard clamp for player and cars
+  // Player on foot
   walkSpeed: 6,
-  runSpeed: 10,
-  carAccel: 26,
-  carMaxSpeed: 40,
-  cometMaxSpeed: 47,
-  carReverseSpeed: 14,
-  carSteer: 1.9,
-  carBrake: 34,
-
-  magSize: 12,
-  reserveStart: 48,
+  runSpeed: 11,
   playerHealth: 100,
-
-  startCash: 0,
-  rewards: { m1: 500, m2: 750, m3: 1000, m4: 1500, m5: 2000, m6: 5000 },
-  taxiFare: 100,
-
-  saveKey: 'portmeridian-save-v1',
-
-  colors: {
-    sky: 0xffd9a0,
-    fog: 0xf2c98d,
-    ground: 0x9a938a,
-    road: 0x33343a,
-    marking: 0xd8d8ce,
-    building: 0x8a7f74,
-    tower: 0x5a6b8a,
-    water: 0x2e7f9e,
-    sand: 0xe0c98f,
-    comet: 0xd21f26,
-    police: 0x1a1d24,
-  },
+  // Cars
+  carTopSpeed: 30,
+  carAccel: 16,
+  carBrake: 30,
+  carDrag: 0.6,
+  carTurnRate: 1.9,
+  carHealth: 100,
+  // Wanted
+  wantedMax: 5,
+  wantedDecayPerSec: 0.045, // slow decay while hidden
+  wantedDecayDelay: 9, // seconds without crime / police nearby
+  // Combat
+  pistolMag: 12,
+  pistolDamage: 34,
+  pistolRange: 90,
+  reloadSeconds: 1.4,
+  fistDamage: 12,
+  fistRange: 2.2,
+  // Missions
+  missionRewards: [500, 400, 600, 800, 1000, 5000],
+  dropTimeLimit: 90,
+  // Economy
+  taxiFarePerMetre: 0.35,
+  taxiMinFare: 25,
+  // Police
+  copCarTopSpeed: 33,
+  copRamDamage: 8,
+  bustDistance: 1.6,
+  bustHoldSeconds: 1.2,
+  // Colours (golden-hour palette)
+  skyTop: 0x2e4a7a,
+  skyBottom: 0xffb36b,
+  sunColor: 0xffd9a0,
+  fogColor: 0xe8a06a,
+  roadColor: 0x2b2e33,
+  sidewalkColor: 0x8d8578,
+  groundColor: 0x6f7d5a,
+  sandColor: 0xe0c188,
+  waterColor: 0x1e6f8e,
 };
 
-// Seeded PRNG (mulberry32). Deterministic city layout per seed.
+// mulberry32 — tiny seeded PRNG. The seed lives in CONFIG so the whole
+// city (buildings, palms, parked cars, pedestrians) is reproducible.
 export function mulberry32(seed) {
   let a = seed >>> 0;
   return function next() {
@@ -72,16 +70,6 @@ export function mulberry32(seed) {
   };
 }
 
-export function makeRng(seed) {
-  const next = mulberry32(seed);
-  return {
-    next,
-    range: (lo, hi) => lo + next() * (hi - lo),
-    int: (lo, hi) => lo + Math.floor(next() * (hi - lo + 1)),
-    pick: (arr) => arr[Math.floor(next() * arr.length)],
-  };
-}
-
 export function clamp(v, lo, hi) {
   return v < lo ? lo : v > hi ? hi : v;
 }
@@ -90,21 +78,53 @@ export function lerp(a, b, t) {
   return a + (b - a) * t;
 }
 
-// Shortest signed difference between two headings, in (-PI, PI].
-export function angDiff(a, b) {
-  let d = (a - b) % (Math.PI * 2);
+// Shortest signed angle difference, in radians.
+export function angleDiff(a, b) {
+  let d = (b - a) % (Math.PI * 2);
   if (d > Math.PI) d -= Math.PI * 2;
-  if (d <= -Math.PI) d += Math.PI * 2;
+  if (d < -Math.PI) d += Math.PI * 2;
   return d;
 }
 
-export function dist2(ax, az, bx, bz) {
-  const dx = ax - bx;
-  const dz = az - bz;
+export function dist2D(x1, z1, x2, z2) {
+  const dx = x2 - x1;
+  const dz = z2 - z1;
   return Math.sqrt(dx * dx + dz * dz);
 }
 
-// Forward vector for a heading where heading 0 faces +z.
-export function headingVec(heading) {
-  return { x: Math.sin(heading), z: Math.cos(heading) };
+export function pick(rng, arr) {
+  return arr[Math.floor(rng() * arr.length)];
+}
+
+// Road centre lines: -280, -200, ..., 280 (8 lines each axis).
+export function roadLines() {
+  const lines = [];
+  for (let i = 0; i <= CONFIG.blockCount; i++) {
+    lines.push(-CONFIG.cityHalf + i * CONFIG.roadSpacing);
+  }
+  return lines;
+}
+
+// Nearest point on the road grid to (x, z), snapped to a lane offset.
+export function nearestRoadPoint(x, z) {
+  const lines = roadLines();
+  let bestX = lines[0];
+  let bestZ = lines[0];
+  for (const l of lines) {
+    if (Math.abs(l - x) < Math.abs(bestX - x)) bestX = l;
+    if (Math.abs(l - z) < Math.abs(bestZ - z)) bestZ = l;
+  }
+  // Choose the closer axis: drive along x on the nearest z-line, or
+  // along z on the nearest x-line.
+  if (Math.abs(bestZ - z) <= Math.abs(bestX - x)) return { x, z: bestZ, axis: 'x' };
+  return { x: bestX, z, axis: 'z' };
+}
+
+export function isOnRoad(x, z) {
+  const lines = roadLines();
+  const half = CONFIG.roadWidth / 2;
+  for (const l of lines) {
+    if (Math.abs(x - l) < half || Math.abs(z - l) < half) return true;
+  }
+  return false;
 }

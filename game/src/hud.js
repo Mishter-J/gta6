@@ -1,286 +1,230 @@
-// Port Meridian — hud.js
-// DOM overlay built entirely by this module: cash, wanted stars,
-// health, ammo, speed, mission objective + waypoint arrow/distance,
-// message toasts, a circular minimap canvas, and the menu / pause /
-// busted / wasted / complete screens. The controls line is set with
-// textContent and plain separators — no HTML entities, no <br> tags.
+// hud.js — Port Meridian's DOM overlay: cash, wanted stars, health,
+// ammo, speed, the current mission objective with a waypoint arrow and
+// distance, briefing text, message toasts, and a circular minimap canvas
+// (roads, player arrow, mission waypoint, police dots, car icon).
+
+import { CONFIG, dist2D } from './config.js';
 
 export class HUD {
-  constructor() {
-    this.root = document.createElement('div');
-    this.root.id = 'pm-ui';
-    document.body.appendChild(this.root);
-
-    const style = document.createElement('style');
-    style.textContent = `
-      #pm-ui { position: fixed; inset: 0; pointer-events: none; font-family: Arial, Helvetica, sans-serif; color: #fff; z-index: 10; }
-      #pm-ui .topbar { position: absolute; top: 12px; left: 12px; right: 12px; display: flex; gap: 18px; font-size: 20px; font-weight: bold; text-shadow: 0 2px 4px #000; }
-      #pm-ui .topbar .stars { color: #ffd76a; letter-spacing: 2px; }
-      #pm-ui .healthbar { width: 130px; height: 12px; background: #222; border: 1px solid #fff; display: inline-block; vertical-align: middle; }
-      #pm-ui .healthbar i { display: block; height: 100%; background: #3fae5a; }
-      #pm-ui .objective { position: absolute; top: 52px; left: 12px; max-width: 520px; font-size: 16px; background: rgba(0,0,0,0.55); padding: 8px 12px; border-radius: 6px; line-height: 1.4; }
-      #pm-ui .objective .arrow { font-size: 22px; color: #ffd76a; }
-      #pm-ui .toast { position: absolute; bottom: 110px; left: 50%; transform: translateX(-50%); font-size: 19px; font-weight: bold; background: rgba(0,0,0,0.65); padding: 10px 18px; border-radius: 8px; display: none; text-align: center; max-width: 80%; }
-      #pm-ui #pm-minimap { position: absolute; right: 14px; bottom: 14px; width: 170px; height: 170px; border-radius: 50%; border: 3px solid rgba(255,255,255,0.85); background: rgba(10,14,20,0.85); }
-      #pm-ui .overlay { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; background: rgba(8,10,18,0.72); pointer-events: auto; text-align: center; }
-      #pm-ui .overlay h1 { font-size: 64px; margin: 0; letter-spacing: 6px; color: #ffd76a; text-shadow: 0 4px 18px #000; }
-      #pm-ui .overlay h2 { font-size: 30px; margin: 6px 0 18px 0; color: #fff; }
-      #pm-ui .overlay .sub { font-size: 18px; margin: 4px 0 20px 0; color: #ffe9b0; }
-      #pm-ui .overlay .controls { font-size: 15px; color: #ddd; margin: 18px 0 8px 0; max-width: 720px; line-height: 1.7; }
-      #pm-ui .overlay button { pointer-events: auto; font-size: 20px; font-weight: bold; padding: 12px 30px; margin: 6px; border: none; border-radius: 8px; background: #ffd76a; color: #222; cursor: pointer; }
-      #pm-ui .overlay button.secondary { background: #e8e8e8; }
-      #pm-ui .overlay button:disabled { opacity: 0.45; cursor: default; }
-      #pm-ui .hidden { display: none !important; }
-    `;
-    document.head.appendChild(style);
-
-    this.root.innerHTML = '';
-    // Top bar.
-    this.topbar = this._div('topbar');
-    this.cashEl = this._span('$0');
-    this.starsEl = this._span('', 'stars');
-    this.healthWrap = this._span('');
-    this.healthBar = document.createElement('span');
-    this.healthBar.className = 'healthbar';
-    this.healthFill = document.createElement('i');
-    this.healthBar.appendChild(this.healthFill);
-    this.healthWrap.appendChild(document.createTextNode('HP '));
-    this.healthWrap.appendChild(this.healthBar);
-    this.ammoEl = this._span('12 / 48');
-    this.speedEl = this._span('');
-    this.topbar.append(this.cashEl, this.starsEl, this.healthWrap, this.ammoEl, this.speedEl);
-    this.root.appendChild(this.topbar);
-
-    this.objectiveEl = this._div('objective');
-    this.root.appendChild(this.objectiveEl);
-
-    this.toastEl = this._div('toast');
-    this.root.appendChild(this.toastEl);
-
-    this.minimap = document.createElement('canvas');
-    this.minimap.id = 'pm-minimap';
-    this.minimap.width = 170;
-    this.minimap.height = 170;
-    this.root.appendChild(this.minimap);
-
-    // Menu overlay.
-    this.menuEl = this._overlay('menu');
-    const title = document.createElement('h1');
-    title.textContent = 'PORT MERIDIAN';
-    const sub = document.createElement('div');
-    sub.className = 'sub';
-    sub.textContent = 'An open-world crime story — Rex Calloway is back in town.';
-    this.btnNew = this._button('New Game', 'btn-new');
-    this.btnContinue = this._button('Continue', 'btn-continue');
-    const controls = document.createElement('div');
-    controls.className = 'controls';
-    controls.id = 'pm-controls';
-    controls.textContent = 'WASD / Arrows — Move and Drive · Mouse — Look and Fire · E — Enter / Exit Car · F — Fire · R — Reload · Space — Handbrake · P / Esc — Pause · M — Mute';
-    this.menuEl.append(title, sub, this.btnNew, this.btnContinue, controls);
-    this.root.appendChild(this.menuEl);
-
-    // Pause overlay.
-    this.pauseEl = this._overlay('pause');
-    const pauseTitle = document.createElement('h2');
-    pauseTitle.textContent = 'PAUSED';
-    this.btnResume = this._button('Resume', 'btn-resume');
-    this.btnRestart = this._button('Restart Mission', 'btn-restart');
-    this.btnSaveQuit = this._button('Save and Quit to Menu', 'btn-savequit');
-    this.btnSaveQuit.classList.add('secondary');
-    this.pauseEl.append(pauseTitle, this.btnResume, this.btnRestart, this.btnSaveQuit);
-    this.root.appendChild(this.pauseEl);
-
-    // Busted / wasted overlay.
-    this.endEl = this._overlay('end');
-    this.endTitle = document.createElement('h1');
-    this.endTitle.textContent = 'BUSTED';
-    this.endText = document.createElement('div');
-    this.endText.className = 'sub';
-    this.btnRetry = this._button('Retry Mission', 'btn-retry');
-    this.btnQuitMenu = this._button('Quit to Menu', 'btn-quit-menu');
-    this.btnQuitMenu.classList.add('secondary');
-    this.endEl.append(this.endTitle, this.endText, this.btnRetry, this.btnQuitMenu);
-    this.root.appendChild(this.endEl);
-
-    // Job complete overlay.
-    this.completeEl = this._overlay('complete');
-    const doneTitle = document.createElement('h1');
-    doneTitle.textContent = 'JOB COMPLETE';
-    this.completeText = document.createElement('div');
-    this.completeText.className = 'sub';
-    this.btnPlayAgain = this._button('Play Again', 'btn-playagain');
-    this.completeEl.append(doneTitle, this.completeText, this.btnPlayAgain);
-    this.root.appendChild(this.completeEl);
-
-    this._toastTimer = null;
-    this.showMenu(false);
-  }
-
-  _div(cls) {
-    const d = document.createElement('div');
-    if (cls) d.className = cls;
-    return d;
-  }
-
-  _span(text, cls) {
-    const s = document.createElement('span');
-    if (cls) s.className = cls;
-    s.textContent = text;
-    return s;
-  }
-
-  _overlay(name) {
-    const d = this._div('overlay hidden');
-    d.id = `pm-${name}`;
-    return d;
-  }
-
-  _button(label, id) {
-    const b = document.createElement('button');
-    b.id = id;
-    b.textContent = label;
-    return b;
-  }
-
-  _hideAllOverlays() {
-    for (const el of [this.menuEl, this.pauseEl, this.endEl, this.completeEl]) {
-      el.classList.add('hidden');
+  constructor(ctx) {
+    this.ctx = ctx;
+    this.el = {};
+    for (const id of [
+      'hud', 'cash', 'stars', 'health-fill', 'health-num', 'ammo', 'speed',
+      'objective', 'briefing', 'toasts', 'minimap', 'crosshair', 'hint',
+      'menu', 'pause-menu', 'end-screen', 'end-title', 'end-sub',
+      'btn-new', 'btn-continue', 'btn-resume', 'btn-restart', 'btn-quit',
+      'btn-retry', 'radio-name',
+    ]) {
+      this.el[id] = document.getElementById(id);
     }
+    this.map = this.el['minimap'].getContext('2d');
+    this.toasts = [];
+    this.lastToast = ''; // latest toast text, exposed to the __PM bridge
+    this.briefingTimer = 0;
   }
+
+  // --- Screens ---------------------------------------------------------
 
   showMenu(canContinue) {
-    this._hideAllOverlays();
-    this.menuEl.classList.remove('hidden');
-    this.btnContinue.disabled = !canContinue;
-    this.topbar.classList.add('hidden');
-    this.objectiveEl.classList.add('hidden');
-    this.minimap.classList.add('hidden');
+    this.el['menu'].style.display = 'flex';
+    this.el['pause-menu'].style.display = 'none';
+    this.el['end-screen'].style.display = 'none';
+    this.el['hud'].style.display = 'none';
+    this.el['btn-continue'].style.display = canContinue ? 'block' : 'none';
   }
 
-  showPlaying() {
-    this._hideAllOverlays();
-    this.topbar.classList.remove('hidden');
-    this.objectiveEl.classList.remove('hidden');
-    this.minimap.classList.remove('hidden');
+  showGame() {
+    this.el['menu'].style.display = 'none';
+    this.el['pause-menu'].style.display = 'none';
+    this.el['end-screen'].style.display = 'none';
+    this.el['hud'].style.display = 'block';
   }
 
   showPause() {
-    this._hideAllOverlays();
-    this.pauseEl.classList.remove('hidden');
+    this.el['pause-menu'].style.display = 'flex';
   }
 
-  showEnd(kind, text) {
-    this._hideAllOverlays();
-    this.endTitle.textContent = kind === 'busted' ? 'BUSTED' : 'WASTED';
-    this.endText.textContent = text || '';
-    this.endEl.classList.remove('hidden');
+  hidePause() {
+    this.el['pause-menu'].style.display = 'none';
   }
 
-  showComplete(text) {
-    this._hideAllOverlays();
-    this.completeText.textContent = text || '';
-    this.completeEl.classList.remove('hidden');
-  }
-
-  toast(msg, ms) {
-    this.toastEl.textContent = msg;
-    this.toastEl.style.display = 'block';
-    if (this._toastTimer) clearTimeout(this._toastTimer);
-    this._toastTimer = setTimeout(() => {
-      this.toastEl.style.display = 'none';
-    }, ms || 3500);
-  }
-
-  update(s) {
-    this.cashEl.textContent = `$${s.cash}`;
-    let stars = '';
-    for (let i = 0; i < 5; i++) stars += i < s.wanted ? '★' : '☆';
-    this.starsEl.textContent = stars;
-    this.healthFill.style.width = `${Math.max(0, Math.min(100, s.health))}%`;
-    this.ammoEl.textContent = `${s.mag} / ${s.reserve}`;
-    this.speedEl.textContent = s.inCar ? `${Math.round(s.speedKmh)} MPH` : '';
-    let obj = s.objective || '';
-    if (s.waypointDist != null) {
-      const arrow = this._arrowChar(s.waypointAngle);
-      obj += `  ${arrow} ${Math.round(s.waypointDist)}m`;
+  showEnd(kind) {
+    const end = this.el['end-screen'];
+    end.style.display = 'flex';
+    if (kind === 'busted') {
+      this.el['end-title'].textContent = 'BUSTED';
+      this.el['end-title'].style.color = '#4a90ff';
+      this.el['end-sub'].textContent = 'Detective Hale has you. The Meridian PD books Rex Calloway — again.';
+    } else if (kind === 'wasted') {
+      this.el['end-title'].textContent = 'WASTED';
+      this.el['end-title'].style.color = '#ff4444';
+      this.el['end-sub'].textContent = 'Rex Calloway is down. Port Meridian keeps spinning without him.';
+    } else {
+      this.el['end-title'].textContent = 'JOB COMPLETE';
+      this.el['end-title'].style.color = '#ffd21f';
+      this.el['end-sub'].textContent = `The Meridian Job is done. Rex walks away with $${this.ctx.cash.toLocaleString()} — Mara Voss sends her regards.`;
     }
-    this.objectiveEl.textContent = obj;
-    this._drawMinimap(s);
   }
 
-  _arrowChar(angle) {
-    if (angle == null) return '◆';
-    // angle: relative bearing, 0 = ahead. 8-way arrow.
-    const dirs = ['▲', '↗', '▶', '↘', '▼', '↙', '◀', '↖'];
-    const idx = Math.round(((angle % (Math.PI * 2)) + Math.PI * 2) / (Math.PI / 4)) % 8;
-    return dirs[idx];
+  hideEnd() {
+    this.el['end-screen'].style.display = 'none';
   }
 
-  _drawMinimap(s) {
-    const c = this.minimap.getContext('2d');
-    if (!c) return;
-    const W = 170;
-    const H = 170;
-    const cx = W / 2;
-    const cy = H / 2;
-    const scale = W / 320; // city 300 wide -> fits
-    c.clearRect(0, 0, W, H);
-    c.fillStyle = 'rgba(20,26,34,0.9)';
-    c.beginPath();
-    c.arc(cx, cy, 84, 0, Math.PI * 2);
-    c.fill();
+  // --- Toasts & briefing ----------------------------------------------
+
+  toast(text) {
+    this.lastToast = text;
+    const div = document.createElement('div');
+    div.className = 'toast';
+    div.textContent = text;
+    this.el['toasts'].appendChild(div);
+    this.toasts.push({ div, t: 0 });
+    while (this.toasts.length > 4) {
+      const old = this.toasts.shift();
+      old.div.remove();
+    }
+  }
+
+  setBriefing(text) {
+    this.el['briefing'].textContent = text;
+    this.el['briefing'].style.opacity = '1';
+    this.briefingTimer = 7;
+  }
+
+  setRadio(name) {
+    this.el['radio-name'].textContent = name ? `♪ ${name}` : '';
+  }
+
+  // --- Per-frame update ------------------------------------------------
+
+  update(dt) {
+    const ctx = this.ctx;
+    // Toast lifetimes.
+    for (const t of [...this.toasts]) {
+      t.t += dt;
+      if (t.t > 4.5) {
+        t.div.remove();
+        this.toasts = this.toasts.filter((x) => x !== t);
+      }
+    }
+    if (this.briefingTimer > 0) {
+      this.briefingTimer -= dt;
+      if (this.briefingTimer <= 0) this.el['briefing'].style.opacity = '0.25';
+    }
+    if (ctx.state !== 'playing' && ctx.state !== 'paused') return;
+
+    this.el['cash'].textContent = `$${ctx.cash.toLocaleString()}`;
+    const stars = '★'.repeat(ctx.police.stars) + '☆'.repeat(5 - ctx.police.stars);
+    this.el['stars'].textContent = stars;
+    this.el['stars'].style.color = ctx.police.stars > 0 ? '#ff4444' : '#888888';
+    const hp = Math.max(0, Math.round(ctx.player.health));
+    this.el['health-fill'].style.width = `${hp}%`;
+    this.el['health-num'].textContent = `${hp}`;
+    this.el['ammo'].textContent = ctx.combat.reloading
+      ? 'RELOADING…'
+      : `AMMO ${ctx.combat.ammo} / ${CONFIG.pistolMag}`;
+    const mph = ctx.player.driving ? Math.round(Math.abs(ctx.player.car.speed) * 2.237) : 0;
+    this.el['speed'].textContent = ctx.player.driving ? `${mph} MPH` : '';
+    this.el['objective'].textContent = ctx.missions.objectiveText();
+    const wp = ctx.missions.waypoint();
+    const p = ctx.player.pos;
+    this.el['hint'].textContent = ctx.player.driving
+      ? 'E exit car · Space handbrake · F fire · R reload · P pause · M mute'
+      : 'WASD move · E enter car / taxi · F fire · R reload · P pause · M mute';
+
+    // Crosshair only on foot while playing.
+    this.el['crosshair'].style.display = ctx.player.driving ? 'none' : 'block';
+
+    this._drawMinimap(wp, p);
+  }
+
+  _drawMinimap(wp, p) {
+    const c = this.map;
+    const S = 180;
+    const scale = S / (CONFIG.cityHalf * 2 + 90);
+    const toMap = (x, z) => [S / 2 + x * scale, S / 2 + z * scale];
+    c.clearRect(0, 0, S, S);
+    // Circular clip.
     c.save();
     c.beginPath();
-    c.arc(cx, cy, 84, 0, Math.PI * 2);
+    c.arc(S / 2, S / 2, S / 2, 0, Math.PI * 2);
     c.clip();
-    const toMap = (x, z) => [cx + x * scale, cy + z * scale];
+    c.fillStyle = '#20242a';
+    c.fillRect(0, 0, S, S);
     // Roads.
-    c.strokeStyle = '#5a6068';
-    c.lineWidth = 5;
-    for (const r of [-120, -80, -40, 0, 40, 80, 120]) {
-      const [x1, y1] = toMap(r, -150);
-      const [x2, y2] = toMap(r, 150);
-      c.beginPath(); c.moveTo(x1, y1); c.lineTo(x2, y2); c.stroke();
-      const [x3, y3] = toMap(-150, r);
-      const [x4, y4] = toMap(150, r);
-      c.beginPath(); c.moveTo(x3, y3); c.lineTo(x4, y4); c.stroke();
+    c.strokeStyle = '#5a5f68';
+    c.lineWidth = 4;
+    for (let i = 0; i <= CONFIG.blockCount; i++) {
+      const line = -CONFIG.cityHalf + i * CONFIG.roadSpacing;
+      const [ax] = toMap(line, 0);
+      const [, bz] = toMap(0, line);
+      c.beginPath(); c.moveTo(ax, 0); c.lineTo(ax, S); c.stroke();
+      c.beginPath(); c.moveTo(0, bz); c.lineTo(S, bz); c.stroke();
     }
-    // Waypoint.
-    if (s.waypoint) {
-      const [wx, wy] = toMap(s.waypoint.x, s.waypoint.z);
-      c.fillStyle = '#ffd76a';
-      c.beginPath(); c.arc(wx, wy, 6, 0, Math.PI * 2); c.fill();
-      c.strokeStyle = '#fff';
-      c.lineWidth = 1.5;
-      c.stroke();
+    // Water on the east edge.
+    c.fillStyle = '#1e6f8e';
+    const [wx] = toMap(CONFIG.waterStart, 0);
+    c.fillRect(wx, 0, S - wx, S);
+    // Mission waypoint.
+    if (wp) {
+      const [mx, my] = toMap(wp.x, wp.z);
+      c.fillStyle = '#ffd21f';
+      c.beginPath(); c.arc(mx, my, 5, 0, Math.PI * 2); c.fill();
+      c.strokeStyle = '#ffd21f';
+      c.lineWidth = 2;
+      c.beginPath(); c.arc(mx, my, 9, 0, Math.PI * 2); c.stroke();
     }
-    // Taxi fare.
-    if (s.taxi && s.taxi.visible) {
-      const [tx, ty] = toMap(s.taxi.x, s.taxi.z);
-      c.fillStyle = '#ffe14a';
-      c.beginPath(); c.arc(tx, ty, 4, 0, Math.PI * 2); c.fill();
+    // Taxi destination / customer.
+    const taxi = this.ctx.missions.taxi;
+    if (taxi) {
+      const dest = taxi.state === 'riding' ? taxi.dest : { x: taxi.customer.x, z: taxi.customer.z };
+      const [mx, my] = toMap(dest.x, dest.z);
+      c.fillStyle = '#2aff7a';
+      c.beginPath(); c.arc(mx, my, 4, 0, Math.PI * 2); c.fill();
     }
     // Police dots.
-    c.fillStyle = '#5aa2ff';
-    for (const cop of s.cops || []) {
-      const [px, py] = toMap(cop.x, cop.z);
-      c.beginPath(); c.arc(px, py, 3.5, 0, Math.PI * 2); c.fill();
+    c.fillStyle = '#4a90ff';
+    for (const car of this.ctx.police.copCars) {
+      const [mx, my] = toMap(car.x, car.z);
+      c.beginPath(); c.arc(mx, my, 3, 0, Math.PI * 2); c.fill();
     }
-    // Player arrow (rotates with heading); car icon when driving.
-    const [px, py] = toMap(s.playerX, s.playerZ);
+    // Other cars (faint).
+    c.fillStyle = 'rgba(255,255,255,0.5)';
+    for (const v of this.ctx.vehicles.vehicles) {
+      if (v === this.ctx.player.car) continue;
+      const [mx, my] = toMap(v.x, v.z);
+      c.fillRect(mx - 1.5, my - 1.5, 3, 3);
+    }
+    // Player arrow (rotates with heading).
+    const [px, py] = toMap(p.x, p.z);
+    const heading = this.ctx.player.driving ? this.ctx.player.car.heading : this.ctx.player.heading;
     c.save();
     c.translate(px, py);
-    c.rotate(-s.heading + Math.PI);
-    if (s.inCar) {
-      c.fillStyle = '#ff4444';
-      c.fillRect(-4, -7, 8, 14);
-    } else {
-      c.fillStyle = '#ffffff';
-      c.beginPath();
-      c.moveTo(0, -8); c.lineTo(5, 6); c.lineTo(-5, 6); c.closePath();
-      c.fill();
+    c.rotate(heading);
+    c.fillStyle = this.ctx.player.driving ? '#ffd21f' : '#ffffff';
+    c.beginPath();
+    c.moveTo(0, -7);
+    c.lineTo(5, 6);
+    c.lineTo(-5, 6);
+    c.closePath();
+    c.fill();
+    c.restore();
+    c.restore();
+    // Ring border.
+    c.strokeStyle = 'rgba(255,255,255,0.6)';
+    c.lineWidth = 2;
+    c.beginPath();
+    c.arc(S / 2, S / 2, S / 2 - 1, 0, Math.PI * 2);
+    c.stroke();
+    // Waypoint distance readout under the minimap is handled by the
+    // objective line; the arrow in the 3D world points the way too.
+    if (wp) {
+      const d = Math.round(dist2D(p.x, p.z, wp.x, wp.z));
+      c.fillStyle = '#ffd21f';
+      c.font = 'bold 13px sans-serif';
+      c.textAlign = 'center';
+      c.fillText(`${d}m`, S / 2, S - 8);
     }
-    c.restore();
-    c.restore();
   }
 }

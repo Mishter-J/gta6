@@ -1,251 +1,357 @@
-// Port Meridian — missions.js
-// Six story missions for Rex Calloway, in order, each with on-screen
-// objective text, a waypoint marker and a cash reward. Fixer Mara Voss
-// hands out the jobs; Detective Hale hunts you. Mission progress and
-// cash persist through the save system. A small taxi side activity
-// runs alongside: pick up a marked pedestrian, drive them across town.
+// missions.js — Port Meridian's story: Rex Calloway, a wheelman back in
+// town; fixer Mara Voss hands out the jobs, Detective Hale hunts him.
+// Six missions in order, each with on-screen objective text, a waypoint
+// beacon + distance, and a cash reward. Plus the taxi side activity.
 
-import * as THREE from '../vendor/three.module.min.js';
-import { CONFIG, dist2 } from './config.js';
+import { CONFIG, dist2D } from './config.js';
 
-const DEFS = [
+export const MISSIONS = [
   {
-    name: 'First Wheels',
-    objective: 'Steal the red Comet and bring it to the marked garage',
-    reward: CONFIG.rewards.m1,
-    waypoint: () => ({ x: CONFIG.garagePos.x, z: CONFIG.garagePos.z, r: CONFIG.garageRadius }),
+    id: 1,
+    title: 'First Wheels',
+    briefing: 'Mara Voss: "Welcome back, Rex. First, wheels. Steal the red Comet by the plaza and bring it to my garage."',
+    reward: 500,
   },
   {
-    name: 'Dock Pickup',
-    objective: 'Drive to the docks and collect the package while heat is on',
-    reward: CONFIG.rewards.m2,
-    waypoint: () => ({ x: CONFIG.docksPos.x, z: CONFIG.docksPos.z, r: 12 }),
+    id: 2,
+    title: 'Dock Pickup',
+    briefing: 'Mara Voss: "A package is waiting at the docks. Grab it — and mind the heat, the PD is watching the piers."',
+    reward: 400,
   },
   {
-    name: 'Lose the Tail',
-    objective: 'Escape the pursuit — get your wanted level down to 0 stars',
-    reward: CONFIG.rewards.m3,
-    waypoint: () => null,
+    id: 3,
+    title: 'Lose the Tail',
+    briefing: 'Detective Hale has your plate. Lose the tail — get your wanted level down to zero.',
+    reward: 600,
   },
   {
-    name: 'Payback',
-    objective: 'Warehouse shootout: defeat all 5 Vipers gang members',
-    reward: CONFIG.rewards.m4,
-    waypoint: () => ({ x: CONFIG.warehousePos.x, z: CONFIG.warehousePos.z, r: 16 }),
+    id: 4,
+    title: 'Payback',
+    briefing: 'Mara Voss: "The Vipers torched my last driver. Five of them are holed up at the west warehouse. Settle it."',
+    reward: 800,
   },
   {
-    name: 'Cross-Town Drop',
-    objective: 'Deliver the package across town within 90 seconds',
-    reward: CONFIG.rewards.m5,
-    waypoint: () => ({ x: CONFIG.dropPos.x, z: CONFIG.dropPos.z, r: 12 }),
+    id: 5,
+    title: 'Cross-Town Drop',
+    briefing: 'Mara Voss: "Hot package, cold trail. Get it across town in 90 seconds — the buyer does not wait."',
+    reward: 1000,
   },
   {
-    name: 'The Meridian Job',
-    objective: 'Finale at Meridian Bank: clear the guards, then reach the bank',
-    reward: CONFIG.rewards.m6,
-    waypoint: () => ({ x: CONFIG.bankPos.x, z: CONFIG.bankPos.z, r: 14 }),
+    id: 6,
+    title: 'The Meridian Job',
+    briefing: 'Mara Voss: "The big one. Meridian Bank. Get inside, hold the vault, and walk out rich. Hale will bring everything he has."',
+    reward: 5000,
   },
 ];
 
-function makeEnemyMesh(color) {
-  const g = new THREE.Group();
-  const shirt = new THREE.MeshLambertMaterial({ color });
-  const skin = new THREE.MeshLambertMaterial({ color: 0xb98a68 });
-  const pants = new THREE.MeshLambertMaterial({ color: 0x222222 });
-  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.42, 0.9, 4, 8), shirt);
-  body.position.y = 1.15;
-  g.add(body);
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.32, 10, 8), skin);
-  head.position.y = 2.05;
-  g.add(head);
-  const gun = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.12, 0.7), pants);
-  gun.position.set(0.3, 1.3, 0.4);
-  g.add(gun);
-  for (const sx of [-0.18, 0.18]) {
-    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.75, 0.26), pants);
-    leg.position.set(sx, 0.38, 0);
-    g.add(leg);
-  }
-  return g;
-}
+// Fixed story locations (x, z).
+export const SPOTS = {
+  comet: { x: 52, z: 36 },
+  garage: { x: 200, z: 40 },
+  docks: { x: -84, z: 262 },
+  warehouse: { x: -200, z: 8 },
+  bank: { x: -40, z: -182 },
+  dropoff: { x: -200, z: -240 },
+  plaza: { x: 40, z: 40 },
+};
 
-export class Missions {
-  // callbacks: { toast(msg), setWanted(n), onMissionComplete(def),
-  //              onAllComplete(), onDamage(amount, kind) }
-  constructor(scene, callbacks) {
-    this.scene = scene;
-    this.cb = callbacks;
+export class MissionManager {
+  constructor(ctx) {
+    this.ctx = ctx;
+    this.index = 0; // 0-based mission; 6 = story complete
+    this.stage = 'go'; // per-mission sub-stage
+    this.stageTimer = 0;
+    this.vipersDown = 0;
+    this.vipersTotal = 5;
+    this.taxi = null; // { customer, dest, fare, pickupX, pickupZ }
+    this.packageTimer = 0;
+    this.holdTimer = 0;
+  }
+
+  get current() {
+    return MISSIONS[this.index] || null;
+  }
+
+  get complete() {
+    return this.index >= MISSIONS.length;
+  }
+
+  start() {
     this.index = 0;
-    this.timer = 0;
-    this.enemies = [];
-    this.time = 0;
-    this.shootTimer = 0;
-    // Taxi side activity: one waiting fare at a time.
-    this.taxi = {
-      state: 'waiting',
-      pickup: { x: 40, z: 120 },
-      dest: { x: -40, z: -120 },
-      mesh: null,
-    };
-    const fare = new THREE.Mesh(
-      new THREE.SphereGeometry(0.6, 10, 8),
-      new THREE.MeshBasicMaterial({ color: 0xffe14a }),
-    );
-    fare.position.set(this.taxi.pickup.x, 1.2, this.taxi.pickup.z);
-    scene.add(fare);
-    this.taxi.mesh = fare;
+    this.stage = 'go';
+    this.vipersDown = 0;
+    this.taxi = null;
+    this._applyStage();
   }
 
-  reset() {
-    this.index = 0;
-    this.timer = 0;
-    this._clearEnemies();
-    this.taxi.state = 'waiting';
-    this.taxi.mesh.visible = true;
-    this.taxi.mesh.position.set(this.taxi.pickup.x, 1.2, this.taxi.pickup.z);
-  }
-
-  _clearEnemies() {
-    for (const e of this.enemies) this.scene.remove(e.mesh);
-    this.enemies = [];
-  }
-
-  currentDef() {
-    return DEFS[this.index] || null;
-  }
-
+  // Objective line shown in the HUD.
   objectiveText() {
-    const def = this.currentDef();
-    if (!def) return 'All jobs done — Port Meridian is yours.';
-    let text = `Mission ${this.index + 1}/6 — ${def.name}: ${def.objective}`;
-    if (this.index === 4 && this.timer > 0) text += ` (${Math.ceil(this.timer)}s left)`;
-    return text;
+    if (this.complete) return 'Story complete — Port Meridian is yours.';
+    const m = this.current;
+    switch (this.index) {
+      case 0:
+        return this.stage === 'steal'
+          ? `Mission 1 — ${m.title}: Steal the red Comet`
+          : `Mission 1 — ${m.title}: Drive the Comet to Mara's garage`;
+      case 1:
+        return this.stage === 'collect'
+          ? `Mission 2 — ${m.title}: Collect the package at the docks`
+          : `Mission 2 — ${m.title}: Drive to the docks`;
+      case 2:
+        return `Mission 3 — ${m.title}: Lose the cops (wanted ${this.ctx.police.stars}★ — get to 0)`;
+      case 3:
+        return `Mission 4 — ${m.title}: Defeat the Vipers (${this.vipersDown}/${this.vipersTotal})`;
+      case 4:
+        return this.stage === 'drive'
+          ? `Mission 5 — ${m.title}: Deliver across town — ${Math.ceil(this.packageTimer)}s left!`
+          : `Mission 5 — ${m.title}: Pick up the package at the plaza`;
+      case 5:
+        return this.stage === 'hold'
+          ? `Mission 6 — ${m.title}: Hold the vault! ${Math.ceil(this.holdTimer)}s`
+          : `Mission 6 — ${m.title}: Get to Meridian Bank`;
+      default:
+        return m.title;
+    }
   }
 
+  // Current waypoint position for the HUD arrow / minimap / beacon.
   waypoint() {
-    const def = this.currentDef();
-    return def ? def.waypoint() : null;
-  }
-
-  startMission(i) {
-    this.index = i;
-    this.timer = 0;
-    this._clearEnemies();
-    if (i === 1) {
-      // Heat from the Comet steal is still on — no reset needed.
-      this.cb.toast('Mara Voss: heat is on — grab the package at the docks.');
-    } else if (i === 2) {
-      this.cb.setWanted(3);
-      this.cb.toast('Detective Hale is on your tail — lose them!');
-    } else if (i === 3) {
-      this._spawnEnemies(CONFIG.warehousePos, 5, 0x8a2a2a, 'Viper');
-      this.cb.toast('Payback: clear out the Vipers at the warehouse.');
-    } else if (i === 4) {
-      this.timer = 90;
-      this.cb.toast('Cross-Town Drop: 90 seconds. Drive!');
-    } else if (i === 5) {
-      this._spawnEnemies(CONFIG.bankPos, 3, 0x2a3a8a, 'Guard');
-      this.cb.toast('The Meridian Job: clear the guards, hit the bank.');
+    if (this.complete) return null;
+    switch (this.index) {
+      case 0: return this.stage === 'steal' ? SPOTS.comet : SPOTS.garage;
+      case 1: return SPOTS.docks;
+      case 2: return null; // no fixed point: the goal is to lose the tail
+      case 3: return SPOTS.warehouse;
+      case 4: return this.stage === 'pickup' ? SPOTS.plaza : SPOTS.dropoff;
+      case 5: return SPOTS.bank;
+      default: return null;
     }
   }
 
-  _spawnEnemies(center, count, color, label) {
-    for (let i = 0; i < count; i++) {
-      const angle = (i / count) * Math.PI * 2;
-      const x = center.x + Math.cos(angle) * 10;
-      const z = center.z + Math.sin(angle) * 10;
-      const mesh = makeEnemyMesh(color);
-      mesh.position.set(x, 0, z);
-      this.scene.add(mesh);
-      this.enemies.push({ x, z, health: 100, alive: true, mesh, label, shootIn: 1 + i * 0.4 });
+  _applyStage() {
+    const ctx = this.ctx;
+    // Normalise the opening stage for missions whose first step has its
+    // own name (steal the Comet / pick up the package).
+    if (this.index === 0 && this.stage === 'go') this.stage = 'steal';
+    if (this.index === 4 && this.stage === 'go') this.stage = 'pickup';
+    ctx.world.removeBeacon('mission');
+    const wp = this.waypoint();
+    if (wp) ctx.world.addBeacon('mission', wp.x, wp.z, 0xffd21f);
+    const m = this.current;
+    if (m) {
+      ctx.hud.toast(`${m.title} — $${m.reward}`);
+      ctx.hud.setBriefing(m.briefing);
+      ctx.audio.missionSting();
+    }
+    if (this.index === 2) {
+      // Mission 3 starts hot: a 3-star pursuit.
+      ctx.police.wanted = 3;
+      ctx.audio.setSiren(3);
+    }
+    if (this.index === 3) {
+      this._spawnVipers();
+    }
+    if (this.index === 4) {
+      this.packageTimer = CONFIG.dropTimeLimit;
+    }
+    if (this.index === 5) {
+      this.holdTimer = 10;
     }
   }
 
-  _completeCurrent() {
-    const def = this.currentDef();
-    if (!def) return;
-    // Advance first, so the completion callback (cash + auto-save)
-    // records the NEW mission index, not the finished one.
+  _spawnVipers() {
+    const spots = [
+      { x: -196, z: 4 }, { x: -206, z: 12 }, { x: -190, z: 20 },
+      { x: -212, z: -2 }, { x: -198, z: 26 },
+    ];
+    for (const s of spots) this.ctx.pedestrians.spawnViper(s.x, s.z);
+    this.vipersDown = 0;
+    this.vipersTotal = spots.length;
+  }
+
+  onViperDown() {
+    this.vipersDown += 1;
+    this.ctx.hud.toast(`Viper down (${this.vipersDown}/${this.vipersTotal})`);
+    if (this.vipersDown >= this.vipersTotal && this.index === 3) {
+      this._finishMission();
+    }
+  }
+
+  _finishMission() {
+    const m = this.current;
+    if (!m) return;
+    const reward = CONFIG.missionRewards[this.index] ?? m.reward;
+    this.ctx.cash += reward;
+    this.ctx.hud.toast(`Mission complete! +$${reward}`);
+    this.ctx.audio.cash();
     this.index += 1;
-    this.cb.onMissionComplete(def);
-    if (this.index >= DEFS.length) {
-      this.cb.onAllComplete();
+    this.stage = 'go';
+    // Save AFTER advancing: the save must record the NEXT mission,
+    // or Continue resumes the mission that just finished.
+    this.ctx.saveGame();
+    if (this.complete) {
+      this.ctx.world.removeBeacon('mission');
+      this.ctx.setState('complete');
       return;
     }
-    this.startMission(this.index);
+    this._applyStage();
   }
 
-  update(dt, ctx) {
-    // ctx: { playerX, playerZ, inCar, carIsComet, wanted, onDamage }
-    this.time += dt;
-    const def = this.currentDef();
-    if (!def) return;
+  _failMission(reason) {
+    this.ctx.hud.toast(`${reason} — mission failed, try again`);
+    this.ctx.audio.dryClick();
+    this.stage = 'go';
+    if (this.index === 4) this.packageTimer = CONFIG.dropTimeLimit;
+    if (this.index === 5) this.holdTimer = 10;
+    this._applyStage();
+  }
 
-    // Enemies advance on the player and shoot when close.
-    this.shootTimer -= dt;
-    for (const e of this.enemies) {
-      if (!e.alive) continue;
-      const d = dist2(e.x, e.z, ctx.playerX, ctx.playerZ);
-      if (d > 3 && d < 60) {
-        const dx = (ctx.playerX - e.x) / d;
-        const dz = (ctx.playerZ - e.z) / d;
-        e.x += dx * 3.2 * dt;
-        e.z += dz * 3.2 * dt;
-        e.mesh.position.set(e.x, 0, e.z);
-        e.mesh.rotation.y = Math.atan2(dx, dz);
+  update(dt) {
+    if (this.ctx.state !== 'playing' || this.complete) return;
+    const p = this.ctx.player.pos;
+    const player = this.ctx.player;
+
+    switch (this.index) {
+      case 0: {
+        if (this.stage === 'steal' && player.driving && player.car && player.car.isComet) {
+          this.stage = 'drive';
+          this._applyStage();
+        } else if (this.stage === 'drive' && player.driving && player.car && player.car.isComet) {
+          // Generous trigger: the garage shed is walled on three sides,
+          // so parking on its threshold counts as arriving.
+          if (dist2D(p.x, p.z, SPOTS.garage.x, SPOTS.garage.z) < 20) this._finishMission();
+        }
+        break;
       }
-      e.shootIn -= dt;
-      if (e.shootIn <= 0 && d < 35 && !ctx.inCar) {
-        e.shootIn = 1.6;
-        if (ctx.onDamage) ctx.onDamage(4, 'enemy');
+      case 1: {
+        if (dist2D(p.x, p.z, SPOTS.docks.x, SPOTS.docks.z) < 10) {
+          if (this.stage === 'go') {
+            this.stage = 'collect';
+            this.stageTimer = 2;
+            this.ctx.hud.toast('Grabbing the package...');
+          } else if (this.stage === 'collect') {
+            this.stageTimer -= dt;
+            if (this.stageTimer <= 0) {
+              this.ctx.police.addWanted(1, 'spotted at the docks');
+              this._finishMission();
+            }
+          }
+        } else if (this.stage === 'collect') {
+          this.stage = 'go'; // walked away mid-grab
+        }
+        break;
+      }
+      case 2: {
+        if (this.ctx.police.wanted <= 0.01) this._finishMission();
+        break;
+      }
+      case 3: {
+        // Completion is driven by onViperDown().
+        break;
+      }
+      case 4: {
+        if (this.stage === 'pickup') {
+          if (dist2D(p.x, p.z, SPOTS.plaza.x, SPOTS.plaza.z) < 8) {
+            this.stage = 'drive';
+            this.packageTimer = CONFIG.dropTimeLimit;
+            this._applyStage();
+            this.ctx.hud.toast('Package secured — GO!');
+          }
+        } else {
+          this.packageTimer -= dt;
+          if (this.packageTimer <= 0) {
+            this._failMission('Out of time');
+          } else if (dist2D(p.x, p.z, SPOTS.dropoff.x, SPOTS.dropoff.z) < 10) {
+            this._finishMission();
+          }
+        }
+        break;
+      }
+      case 5: {
+        if (this.stage === 'go') {
+          if (dist2D(p.x, p.z, SPOTS.bank.x, SPOTS.bank.z) < 12) {
+            this.stage = 'hold';
+            this.holdTimer = 10;
+            this.ctx.police.wanted = Math.max(this.ctx.police.wanted, 3);
+            this.ctx.audio.setSiren(3);
+            this.ctx.hud.toast('Cracking the vault — hold on!');
+            this._applyStage();
+          }
+        } else {
+          this.holdTimer -= dt;
+          if (dist2D(p.x, p.z, SPOTS.bank.x, SPOTS.bank.z) > 18) {
+            this.stage = 'go';
+            this.holdTimer = 10;
+            this._applyStage();
+          } else if (this.holdTimer <= 0) {
+            this._finishMission();
+          }
+        }
+        break;
+      }
+      default:
+        break;
+    }
+    this._updateTaxi(dt, p);
+  }
+
+  // Taxi side activity: a yellow-marked customer waits; E picks them up
+  // (on foot, nearby); drive them to the beacon for a distance-based fare.
+  _updateTaxi(dt, p) {
+    const ctx = this.ctx;
+    if (!this.taxi) {
+      // A customer appears when the player is on foot in the city.
+      // Seeded RNG (deterministic per session) instead of Math.random().
+      const rng = ctx.rng;
+      if (!ctx.player.driving && ctx.time % 1 < dt && rng() < 0.02) {
+        const angle = rng() * Math.PI * 2;
+        const cx = Math.max(-260, Math.min(260, p.x + Math.sin(angle) * 60));
+        const cz = Math.max(-260, Math.min(260, p.z + Math.cos(angle) * 60));
+        const customer = ctx.pedestrians.spawnTaxiCustomer(cx, cz);
+        const dest = { x: -240 + rng() * 480, z: -240 + rng() * 480 };
+        this.taxi = { customer, dest, state: 'waiting' };
+        ctx.world.addBeacon('taxi', cx, cz, 0xffd21f);
+        ctx.hud.toast('A taxi customer is waving — press E near them');
+      }
+      return;
+    }
+    const t = this.taxi;
+    if (t.state === 'waiting') {
+      if (!t.customer.alive) { this._clearTaxi(); return; }
+      const d = dist2D(p.x, p.z, t.customer.x, t.customer.z);
+      if (d < 4 && ctx.input.wasPressed('KeyE')) {
+        t.state = 'riding';
+        t.fare = Math.max(
+          CONFIG.taxiMinFare,
+          Math.round(dist2D(t.customer.x, t.customer.z, t.dest.x, t.dest.z) * CONFIG.taxiFarePerMetre),
+        );
+        ctx.world.removeBeacon('taxi');
+        ctx.world.addBeacon('taxi', t.dest.x, t.dest.z, 0x2aff7a);
+        ctx.hud.toast(`Passenger aboard — fare $${t.fare}`);
+        ctx.audio.pickup();
+      }
+    } else if (t.state === 'riding') {
+      if (!ctx.player.driving) {
+        // Passenger bails if the player gets out mid-ride.
+        this._clearTaxi();
+        ctx.hud.toast('Passenger left — fare lost');
+        return;
+      }
+      if (dist2D(p.x, p.z, t.dest.x, t.dest.z) < 10) {
+        ctx.cash += t.fare;
+        ctx.hud.toast(`Fare paid! +$${t.fare}`);
+        ctx.audio.cash();
+        this._clearTaxi();
+        ctx.saveGame();
       }
     }
+  }
 
-    // Taxi side activity.
-    if (this.taxi.state === 'waiting' && ctx.inCar) {
-      if (dist2(ctx.playerX, ctx.playerZ, this.taxi.pickup.x, this.taxi.pickup.z) < 6) {
-        this.taxi.state = 'riding';
-        this.taxi.mesh.visible = false;
-        this.cb.toast('Fare picked up — drive them across town.');
-      }
-    } else if (this.taxi.state === 'riding' && ctx.inCar) {
-      if (dist2(ctx.playerX, ctx.playerZ, this.taxi.dest.x, this.taxi.dest.z) < 10) {
-        this.taxi.state = 'waiting';
-        this.taxi.mesh.visible = true;
-        this.cb.toast(`Taxi fare paid: +$${CONFIG.taxiFare}`);
-        if (this.cb.onTaxiFare) this.cb.onTaxiFare(CONFIG.taxiFare);
-      }
+  _clearTaxi() {
+    if (this.taxi) {
+      if (this.taxi.customer.alive) this.taxi.customer._despawn();
+      this.taxi = null;
     }
-
-    // Mission completion checks.
-    if (this.index === 0) {
-      if (ctx.inCar && ctx.carIsComet &&
-          dist2(ctx.playerX, ctx.playerZ, CONFIG.garagePos.x, CONFIG.garagePos.z) < CONFIG.garageRadius) {
-        this._completeCurrent();
-      }
-    } else if (this.index === 1) {
-      if (dist2(ctx.playerX, ctx.playerZ, CONFIG.docksPos.x, CONFIG.docksPos.z) < 12) {
-        this._completeCurrent();
-      }
-    } else if (this.index === 2) {
-      if (ctx.wanted <= 0) this._completeCurrent();
-    } else if (this.index === 3) {
-      if (this.enemies.length > 0 && this.enemies.every((e) => !e.alive)) {
-        this._completeCurrent();
-      }
-    } else if (this.index === 4) {
-      this.timer -= dt;
-      if (dist2(ctx.playerX, ctx.playerZ, CONFIG.dropPos.x, CONFIG.dropPos.z) < 12) {
-        this._completeCurrent();
-      } else if (this.timer <= 0) {
-        this.timer = 90;
-        this.cb.toast('Too slow — the drop window reset. Try again.');
-      }
-    } else if (this.index === 5) {
-      const cleared = this.enemies.length > 0 && this.enemies.every((e) => !e.alive);
-      if (cleared && dist2(ctx.playerX, ctx.playerZ, CONFIG.bankPos.x, CONFIG.bankPos.z) < 14) {
-        this._completeCurrent();
-      }
-    }
+    this.ctx.world.removeBeacon('taxi');
   }
 }
